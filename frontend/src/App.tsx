@@ -1,31 +1,23 @@
 import React, { useState, useEffect } from 'react';
 import { CameraAngle, BatterHand, FrameLandmarks, ShotAnalysis } from './types/cricket';
+import { EnterpriseHeader } from './components/EnterpriseHeader';
 import { LiveCameraFeed } from './components/LiveCameraFeed';
-import { ScoreCard } from './components/ScoreCard';
-import { FlawList } from './components/FlawList';
-import { ImprovementCoach } from './components/ImprovementCoach';
 import { SlowMoReplay } from './components/SlowMoReplay';
-import { SessionDashboard } from './components/SessionDashboard';
+import { TelemetryHub } from './components/TelemetryHub';
 import { VideoUploader } from './components/VideoUploader';
 import { ViewSettingsModal } from './components/ViewSettingsModal';
-import { BiomechanicsRadar } from './components/BiomechanicsRadar';
+import { DrillPlaybookModal } from './components/DrillPlaybookModal';
 import { evaluateCoverDriveClient } from './services/clientShotEvaluator';
 import { analyzeShotOnServer, createBattingSession } from './services/api';
-import {
-  Camera,
-  UploadCloud,
-  Settings2,
-  Activity,
-  Layers,
-  Sparkles,
-  Target
-} from 'lucide-react';
 
 export const App: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'live' | 'upload'>('live');
+  const [activeModule, setActiveModule] = useState<'lab' | 'video' | 'drills'>('lab');
   const [cameraAngle, setCameraAngle] = useState<CameraAngle>('front_on');
   const [batterHand, setBatterHand] = useState<BatterHand>('right');
+  const [selectedPlayer, setSelectedPlayer] = useState<string>('Virat Kohli (RHB #18)');
+
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
+  const [isDrillsOpen, setIsDrillsOpen] = useState<boolean>(false);
 
   const [activeShot, setActiveShot] = useState<ShotAnalysis | null>(null);
   const [activeFrames, setActiveFrames] = useState<FrameLandmarks[]>([]);
@@ -39,6 +31,50 @@ export const App: React.FC = () => {
     createBattingSession('Batter 01', cameraAngle, batterHand)
       .then((sess) => setSessionId(sess.id))
       .catch((e) => console.log('Running in client-standalone mode', e));
+
+    // Pre-populate with an initial demo stroke so the page opens up rich, full, and vibrant immediately!
+    const initialDemo = evaluateCoverDriveClient(
+      Array.from({ length: 45 }, (_, i) => ({
+        frame_index: i,
+        timestamp_ms: i * 33.3,
+        landmarks: Array.from({ length: 33 }, () => ({ x: 0.5, y: 0.5, z: 0, visibility: 0.99 })),
+      })),
+      cameraAngle,
+      batterHand
+    );
+    // Enrich with realistic cover drive metrics
+    initialDemo.overall_score = 8.8;
+    initialDemo.timing_score = 9.2;
+    initialDemo.metrics = {
+      timing: 9.2,
+      head_position: 8.9,
+      front_elbow: 8.6,
+      footwork: 9.0,
+      balance: 8.7,
+      bat_swing_path: 8.8,
+      backlift: 8.5,
+      follow_through: 8.7,
+    };
+    initialDemo.flaws = [
+      {
+        name: 'Front Elbow Dropping / Collapsed Arm',
+        severity: 'medium',
+        frame: 24,
+        measured: 64.5,
+        ideal: '70.0° - 110.0°',
+        affected_joint: 'left_elbow',
+      },
+    ];
+    initialDemo.tips = [
+      {
+        flaw: 'Front Elbow Dropping / Collapsed Arm',
+        why_it_hurts: 'A collapsed elbow forces bottom-hand domination, chipping the ball in the air towards extra cover.',
+        fix: 'Point your front elbow directly at the mid-off/cover region throughout the downswing.',
+        drill: 'Top-Hand Only Tee Drives: 25 drives on a batting tee with top hand leading exclusively.',
+      },
+    ];
+    setActiveShot(initialDemo);
+    setShotsHistory([initialDemo]);
   }, []);
 
   // Handle shot captured from live webcam or presets
@@ -76,89 +112,25 @@ export const App: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen text-slate-100 flex flex-col bg-[#070B14]">
-      {/* Top Broadcast Navigation Header */}
-      <header className="sticky top-0 z-40 bg-[#0B101D]/90 backdrop-blur-xl border-b border-slate-800/80 px-4 lg:px-8 py-3.5">
-        <div className="max-w-7xl mx-auto flex items-center justify-between">
-          {/* Logo & Tagline */}
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-emerald-400 to-teal-600 flex items-center justify-center shadow-glow-green text-slate-950 font-black text-xl">
-              🏏
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-lg font-black tracking-tight text-white uppercase">
-                  Cricket Vision AI
-                </h1>
-                <span className="text-[10px] font-mono font-bold tracking-wider text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/30">
-                  PRO SUITE 1.0
-                </span>
-                <span className="text-[10px] font-mono font-semibold text-sky-400 bg-sky-500/10 px-2 py-0.5 rounded border border-sky-500/20 hidden sm:inline-block">
-                  COVER DRIVE MVP
-                </span>
-              </div>
-              <p className="text-[11px] text-slate-400 hidden sm:block">
-                Optical Pose Biomechanics • High-FPS Kinematic Scoring • Stroke Flaw Coach
-              </p>
-            </div>
-          </div>
+    <div className="min-h-screen text-slate-100 flex flex-col bg-[#050811]">
+      {/* Enterprise SaaS Navigation Header */}
+      <EnterpriseHeader
+        cameraAngle={cameraAngle}
+        batterHand={batterHand}
+        onOpenSettings={() => setIsSettingsOpen(true)}
+        onOpenDrillsModal={() => setIsDrillsOpen(true)}
+        activeModule={activeModule}
+        onModuleChange={setActiveModule}
+        selectedPlayer={selectedPlayer}
+        onPlayerChange={setSelectedPlayer}
+        totalShots={shotsHistory.length}
+      />
 
-          {/* Perspective & Configuration Controls */}
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => setIsSettingsOpen(true)}
-              className="flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-xs font-semibold text-slate-200 border border-slate-700/80 transition-all shadow-sm group"
-            >
-              <Settings2 className="w-4 h-4 text-emerald-400 group-hover:rotate-45 transition-transform duration-300" />
-              <span className="capitalize">{cameraAngle.replace('_', ' ')}</span>
-              <span className="text-slate-500">•</span>
-              <span className="capitalize">{batterHand}-hand</span>
-            </button>
-          </div>
-        </div>
-      </header>
-
-      {/* Mode Selector Tabs (Live Stream vs Video Upload) */}
-      <div className="max-w-7xl mx-auto w-full px-4 lg:px-8 pt-5">
-        <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setActiveTab('live')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
-                activeTab === 'live'
-                  ? 'bg-emerald-500 text-slate-950 shadow-glow-green font-extrabold'
-                  : 'text-slate-400 hover:text-white hover:bg-slate-900/60'
-              }`}
-            >
-              <Camera className="w-4 h-4" />
-              Live Camera Stream (60 FPS MediaPipe)
-            </button>
-            <button
-              onClick={() => setActiveTab('upload')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
-                activeTab === 'upload'
-                  ? 'bg-emerald-500 text-slate-950 shadow-glow-green font-extrabold'
-                  : 'text-slate-400 hover:text-white hover:bg-slate-900/60'
-              }`}
-            >
-              <UploadCloud className="w-4 h-4" />
-              Upload Practice Video (MP4 / MOV)
-            </button>
-          </div>
-
-          {/* Quick Status */}
-          <div className="hidden md:flex items-center gap-2 text-xs text-slate-400 font-mono">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span>AI INFERENCE ENGINE READY</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Main Analysis Workspace Layout */}
+      {/* Main Workspace Layout */}
       <main className="max-w-7xl mx-auto w-full px-4 lg:px-8 py-6 flex-1 grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column: Live Capture / Video Upload & Slow-Mo Replay (7 Cols) */}
+        {/* Left Studio Column: Live Optical Tracking Feed & Slow-Mo Replay (7 Cols) */}
         <div className="lg:col-span-7 space-y-6">
-          {activeTab === 'live' ? (
+          {activeModule === 'lab' ? (
             <LiveCameraFeed
               cameraAngle={cameraAngle}
               batterHand={batterHand}
@@ -185,35 +157,15 @@ export const App: React.FC = () => {
           />
         </div>
 
-        {/* Right Column: Score Card, Radar, Flaws, Coach Tips & Session Dashboard (5 Cols) */}
-        <div className="lg:col-span-5 space-y-6">
-          {/* 1. Score Card with /10 rating & timing sub-score */}
-          <ScoreCard analysis={activeShot} />
-
-          {/* 2. Biomechanical Spider Radar Chart (Current vs Pro Benchmark) */}
-          {activeShot && <BiomechanicsRadar metrics={activeShot.metrics} />}
-
-          {/* 3. Detected Flaws with Measured vs Ideal values */}
-          {activeShot && (
-            <FlawList
-              flaws={activeShot.flaws}
-              selectedJoint={selectedJointHighlight}
-              onSelectFlaw={(flaw) => {
-                setSelectedJointHighlight(
-                  selectedJointHighlight === flaw.affected_joint ? null : (flaw.affected_joint || null)
-                );
-              }}
-            />
-          )}
-
-          {/* 4. Coach Insights: Why it hurts, 1-line fix, and prescribed drills */}
-          {activeShot && <ImprovementCoach tips={activeShot.tips} />}
-
-          {/* 5. Session Dashboard with historical trend */}
-          <SessionDashboard
+        {/* Right Telemetry Hub Column: Multi-Tab Analytics Center (5 Cols) */}
+        <div className="lg:col-span-5">
+          <TelemetryHub
+            activeShot={activeShot}
             shotsHistory={shotsHistory}
             onSelectShot={handleSelectHistoricalShot}
-            activeShotId={activeShot?.shot_id}
+            selectedJointHighlight={selectedJointHighlight}
+            onSelectJointHighlight={setSelectedJointHighlight}
+            onOpenDrillModal={() => setIsDrillsOpen(true)}
           />
         </div>
       </main>
@@ -226,6 +178,12 @@ export const App: React.FC = () => {
         onCameraAngleChange={setCameraAngle}
         batterHand={batterHand}
         onBatterHandChange={setBatterHand}
+      />
+
+      {/* Masterclass Drills Playbook Modal */}
+      <DrillPlaybookModal
+        isOpen={isDrillsOpen}
+        onClose={() => setIsDrillsOpen(false)}
       />
     </div>
   );
