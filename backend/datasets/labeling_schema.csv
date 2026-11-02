@@ -1,0 +1,8 @@
+clip_id,shot_type,score,timing_score,flaws,camera_angle,rater,notes
+CD_001.mp4,cover_drive,7.2,8.0,"front_elbow_dropping;head_falling_away",front_on,Coach_Ravi_BCCI_L2,"High elbow dropped at frame 48"
+CD_002.mp4,cover_drive,9.1,9.5,"none",front_on,Coach_Ravi_BCCI_L2,"Exemplary stroke play, head over knee"
+CD_003.mp4,cover_drive,5.8,6.0,"bat_across_the_line;short_stride_reach",front_on,Coach_Ravi_BCCI_L2,"Lunged without foot to pitch, sliced towards point"
+CD_004.mp4,cover_drive,6.5,7.0,"balance_loss_follow_through",front_on,Coach_Ravi_BCCI_L2,"Fell off balance after contact"
+CD_005.mp4,cover_drive,8.4,8.5,"none",side_on,Coach_Elena_ECB_L3,"Good knee bend and high elbow finish"
+SD_001.mp4,straight_drive,8.6,8.8,"none",front_on,Coach_Ravi_BCCI_L2,"Played right back down the ground"
+PULL_001.mp4,pull_shot,7.8,7.5,"weight_transfer_late",side_on,Coach_Elena_ECB_L3,"Weight caught on front foot slightly"

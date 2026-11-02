@@ -1,0 +1,107 @@
+{
+  "version": "1.0.0",
+  "camera_views": {
+    "front_on": {
+      "description": "Bowler / Umpire perspective facing the batsman directly. Ideal for head lateral fall, bat swing line towards extra cover, shoulder alignment, and front foot placement.",
+      "ideal_ranges": {
+        "cover_drive": {
+          "head_lateral_deviation_max_pct": 5.0,
+          "head_over_knee_tolerance_pct": 8.0,
+          "front_elbow_min_angle_deg": 80.0,
+          "front_elbow_max_angle_deg": 125.0,
+          "front_elbow_elevation_min_deg": 65.0,
+          "shoulder_line_rotation_at_impact_deg": [20.0, 50.0],
+          "stride_forward_min_norm": 0.22,
+          "weight_transfer_front_pct_min": 65.0,
+          "bat_swing_plane_angle_deg": [-15.0, 15.0],
+          "impact_timing_window_ms": [-60, 40],
+          "follow_through_elbow_height_min_norm": 0.85
+        }
+      }
+    },
+    "side_on": {
+      "description": "Profile perspective from point/covers or square leg. Ideal for front knee bend angle, backlift apex height, and stride extension along the crease.",
+      "ideal_ranges": {
+        "cover_drive": {
+          "front_knee_flexion_min_deg": 115.0,
+          "front_knee_flexion_max_deg": 145.0,
+          "front_elbow_angle_deg": [85.0, 120.0],
+          "head_forward_of_waist_min_norm": 0.12,
+          "backlift_height_ratio_min": 0.90,
+          "follow_through_finish_height_norm": 0.80,
+          "stride_length_norm_min": 0.28
+        }
+      }
+    }
+  },
+  "shot_types": {
+    "cover_drive": {
+      "name": "Cover Drive",
+      "description": "Classic attacking off-side drive through extra cover, requiring leaning head, high front elbow, front foot to the pitch of the ball, and flowing follow-through.",
+      "weights": {
+        "head_position": 0.20,
+        "front_elbow": 0.20,
+        "footwork": 0.15,
+        "balance": 0.15,
+        "timing": 0.15,
+        "bat_swing_path": 0.10,
+        "follow_through": 0.05
+      },
+      "ideal_metrics": {
+        "head_position": { "ideal_min": 8.5, "unit": "/10", "label": "Head Alignment over Front Knee" },
+        "front_elbow": { "ideal_min": 8.0, "unit": "/10", "label": "High Front Elbow & Elevation" },
+        "footwork": { "ideal_min": 8.0, "unit": "/10", "label": "Stride to the Pitch of the Ball" },
+        "balance": { "ideal_min": 8.0, "unit": "/10", "label": "Center of Mass & Weight Transfer" },
+        "timing": { "ideal_min": 8.0, "unit": "/10", "label": "Bat Speed Peak at Ball Contact" },
+        "bat_swing_path": { "ideal_min": 8.0, "unit": "/10", "label": "Swing Arc through Extra Cover Line" },
+        "follow_through": { "ideal_min": 7.5, "unit": "/10", "label": "Full Extent High Finish" }
+      }
+    },
+    "straight_drive": {
+      "name": "Straight Drive",
+      "description": "Drive executed back past the bowler with full face of the bat, vertical swing path, and head directly over the contact point.",
+      "weights": {
+        "head_position": 0.20,
+        "front_elbow": 0.20,
+        "footwork": 0.15,
+        "balance": 0.15,
+        "timing": 0.15,
+        "bat_swing_path": 0.10,
+        "follow_through": 0.05
+      }
+    },
+    "pull_shot": {
+      "name": "Pull Shot",
+      "description": "Cross-bat aggressive shot to short-pitched bowling, transferring weight back and rotating hips/shoulders through midwicket.",
+      "weights": {
+        "balance": 0.25,
+        "timing": 0.25,
+        "bat_swing_path": 0.20,
+        "head_position": 0.15,
+        "follow_through": 0.15
+      }
+    },
+    "cut_shot": {
+      "name": "Square Cut",
+      "description": "Back-foot horizontal bat shot played square of the wicket through point, requiring high hands and rapid wrist snap down on the ball.",
+      "weights": {
+        "footwork": 0.20,
+        "timing": 0.25,
+        "bat_swing_path": 0.25,
+        "balance": 0.15,
+        "follow_through": 0.15
+      }
+    },
+    "forward_defense": {
+      "name": "Forward Defense",
+      "description": "Solid defensive block with soft hands, bat angled down towards the pitch, head close to ball, and bat tucked tightly beside front pad.",
+      "weights": {
+        "head_position": 0.25,
+        "front_elbow": 0.25,
+        "balance": 0.20,
+        "footwork": 0.20,
+        "timing": 0.10
+      }
+    }
+  }
+}

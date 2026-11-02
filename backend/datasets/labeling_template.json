@@ -1,0 +1,117 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CricketBattingCoachAnnotationSchema",
+  "description": "Standard schema for coach-rated cricket shot clips and biomechanical flaw annotations",
+  "type": "object",
+  "required": ["clip_id", "shot_type", "overall_score", "flaws", "rater", "camera_angle"],
+  "properties": {
+    "clip_id": {
+      "type": "string",
+      "description": "Unique identifier for the video clip (e.g. CD_001_60FPS.mp4)"
+    },
+    "shot_type": {
+      "type": "string",
+      "enum": ["cover_drive", "straight_drive", "pull_shot", "cut_shot", "forward_defense", "sweep_shot", "flick_shot"]
+    },
+    "camera_angle": {
+      "type": "string",
+      "enum": ["front_on", "side_on"]
+    },
+    "fps": {
+      "type": "integer",
+      "default": 60
+    },
+    "overall_score": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 10.0,
+      "description": "Coach rating out of 10 for the stroke execution"
+    },
+    "timing_score": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 10.0
+    },
+    "impact_frame": {
+      "type": "integer",
+      "description": "Exact frame index where bat-ball contact occurs"
+    },
+    "metrics_breakdown": {
+      "type": "object",
+      "properties": {
+        "head_position": { "type": "number", "minimum": 0, "maximum": 10 },
+        "front_elbow": { "type": "number", "minimum": 0, "maximum": 10 },
+        "footwork": { "type": "number", "minimum": 0, "maximum": 10 },
+        "balance": { "type": "number", "minimum": 0, "maximum": 10 },
+        "bat_swing_path": { "type": "number", "minimum": 0, "maximum": 10 },
+        "follow_through": { "type": "number", "minimum": 0, "maximum": 10 }
+      }
+    },
+    "flaws": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "severity", "frame"],
+        "properties": {
+          "name": { "type": "string" },
+          "severity": { "type": "string", "enum": ["low", "medium", "high"] },
+          "frame": { "type": "integer" },
+          "measured_value": { "type": "number" },
+          "ideal_value": { "type": "string" },
+          "coach_note": { "type": "string" }
+        }
+      }
+    },
+    "rater": {
+      "type": "object",
+      "required": ["name", "credential"],
+      "properties": {
+        "name": { "type": "string" },
+        "credential": { "type": "string", "description": "e.g. BCCI Level 2 Coach, ECB Coach, First-Class Player" },
+        "date_annotated": { "type": "string", "format": "date" }
+      }
+    }
+  },
+  "sample_records": [
+    {
+      "clip_id": "CD_SAMPLE_001.mp4",
+      "shot_type": "cover_drive",
+      "camera_angle": "front_on",
+      "fps": 60,
+      "overall_score": 7.4,
+      "timing_score": 8.0,
+      "impact_frame": 48,
+      "metrics_breakdown": {
+        "head_position": 6.5,
+        "front_elbow": 5.8,
+        "footwork": 8.2,
+        "balance": 8.5,
+        "bat_swing_path": 7.8,
+        "follow_through": 8.0
+      },
+      "flaws": [
+        {
+          "name": "front_elbow_dropping",
+          "severity": "high",
+          "frame": 48,
+          "measured_value": 58.0,
+          "ideal_value": "75.0° - 110.0°",
+          "coach_note": "Front elbow dropped slightly before impact causing bottom-hand dominance"
+        },
+        {
+          "name": "head_falling_away",
+          "severity": "medium",
+          "frame": 46,
+          "measured_value": 5.8,
+          "ideal_value": "0.0% - 4.5%",
+          "coach_note": "Head leaning 2 inches outside the off-stump line"
+        }
+      ],
+      "rater": {
+        "name": "Coach Michael Clarke",
+        "credential": "Level 3 High Performance Coach",
+        "date_annotated": "2026-11-02"
+      }
+    }
+  ]
+}

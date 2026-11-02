@@ -1,0 +1,47 @@
+<!--
+  Label Studio Configuration for Cricket Batting Shot Analysis
+  Use this XML in Label Studio (https://labelstud.io) to configure the video annotation interface:
+  1. Set up a new project
+  2. Paste this XML template into the 'Labeling Setup -> Code' editor
+  3. Import video clips from your local dataset folder
+-->
+<View>
+  <Header value="Cricket Batting Video Analysis &amp; Coach Rating" />
+  
+  <Video name="video" value="$video_url" sync="timeline" />
+  
+  <Header value="Stroke Classification &amp; View" size="5" />
+  <Choices name="shot_type" toName="video" choice="single" showInline="true" required="true">
+    <Choice value="cover_drive" text="Cover Drive" />
+    <Choice value="straight_drive" text="Straight Drive" />
+    <Choice value="pull_shot" text="Pull Shot" />
+    <Choice value="cut_shot" text="Cut Shot" />
+    <Choice value="forward_defense" text="Forward Defense" />
+    <Choice value="sweep_shot" text="Sweep Shot" />
+    <Choice value="flick_shot" text="Flick Shot" />
+  </Choices>
+
+  <Choices name="camera_angle" toName="video" choice="single" showInline="true">
+    <Choice value="front_on" text="Front-On (Bowler View)" />
+    <Choice value="side_on" text="Side-On (Crease Profile)" />
+  </Choices>
+
+  <Header value="Coach Overall Rating (/10)" size="5" />
+  <Rating name="overall_score" toName="video" maxRating="10" defaultValue="7" size="medium" />
+
+  <Header value="Timing Score (/10)" size="5" />
+  <Rating name="timing_score" toName="video" maxRating="10" defaultValue="7" size="medium" />
+
+  <Header value="Identify Flaws (Select All That Apply)" size="5" />
+  <Choices name="flaws" toName="video" choice="multiple">
+    <Choice value="head_falling_away" text="Head Falling Away to Off-Side" />
+    <Choice value="front_elbow_dropping" text="Front Elbow Dropping / Collapsed Arm" />
+    <Choice value="bat_across_the_line" text="Bat Coming Across the Line / Slicing" />
+    <Choice value="short_stride_reach" text="Front Foot Not Reaching Pitch of Ball" />
+    <Choice value="balance_loss_follow_through" text="Loss of Balance on Follow-Through" />
+    <Choice value="bottom_hand_takeover" text="Bottom Hand Squeezing / Domination" />
+  </Choices>
+
+  <Header value="Coach Detailed Observations &amp; Drills" size="5" />
+  <TextArea name="coach_notes" toName="video" rows="3" placeholder="Enter specific biomechanical notes and recommended drill..." />
+</View>

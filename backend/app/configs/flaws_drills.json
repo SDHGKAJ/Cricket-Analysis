@@ -1,0 +1,87 @@
+{
+  "version": "1.0.0",
+  "shots": {
+    "cover_drive": {
+      "flaws": {
+        "head_falling_away": {
+          "id": "CD_FLAW_01",
+          "name": "Head Falling Away to Off-Side",
+          "affected_joint": "nose",
+          "severity": "high",
+          "threshold_condition": "lateral_deviation > 6.5%",
+          "measured_key": "head_lateral_deviation_pct",
+          "ideal_range": "0.0% - 4.5%",
+          "unit": "% width",
+          "why_it_hurts": "When your head falls over to the off-side or leg-side, your eyeline tilts and your hands follow your head away from the true line of the ball, causing leading edges to slip/gully or slicing the ball in the air.",
+          "fix": "Lead into the drive with your head, keeping your eyes level and chin tucked directly over the line of your front knee.",
+          "drill": "Drop-Ball Target Driving: Have a partner drop a ball from shoulder height onto a marked target; step forward and drive while holding your head dead still over the bounce for 2 seconds."
+        },
+        "front_elbow_dropping": {
+          "id": "CD_FLAW_02",
+          "name": "Front Elbow Dropping / Collapsed Arm",
+          "affected_joint": "left_elbow",
+          "severity": "high",
+          "threshold_condition": "front_elbow_elevation < 60 deg or angle > 135 deg",
+          "measured_key": "front_elbow_elevation_deg",
+          "ideal_range": "70.0° - 110.0°",
+          "unit": "degrees",
+          "why_it_hurts": "A collapsed or dropping front elbow forces the bottom hand to dominate, scooping the ball in the air towards extra cover or mid-off instead of stroking it along the carpet.",
+          "fix": "Point your front elbow directly at the mid-off/cover region throughout the downswing, letting the top hand guide the stroke.",
+          "drill": "Top-Hand Only Tee Drives: Place the ball on a batting tee; remove your bottom hand completely and stroke 25 consecutive cover drives focusing on keeping the front elbow high and dominant."
+        },
+        "bat_across_the_line": {
+          "id": "CD_FLAW_03",
+          "name": "Bat Coming Across the Line / Slicing",
+          "affected_joint": "left_wrist",
+          "severity": "high",
+          "threshold_condition": "swing_plane_deviation > 12 deg",
+          "measured_key": "bat_path_deviation_deg",
+          "ideal_range": "-5.0° to +5.0°",
+          "unit": "degrees",
+          "why_it_hurts": "Swinging outside-in across the trajectory of the ball reduces the sweet-spot impact zone, exposing the outside edge to slips and losing all power transfer.",
+          "fix": "Bring the bat down smoothly from first/second slip, presenting the full face straight through the line to extra cover.",
+          "drill": "Two-Stump Channel Drill: Place two upright cones or stumps 1.5 feet apart along the cover drive corridor; swing your bat through the channel without touching either marker."
+        },
+        "short_stride_reach": {
+          "id": "CD_FLAW_04",
+          "name": "Front Foot Not to the Pitch of the Ball",
+          "affected_joint": "left_ankle",
+          "severity": "medium",
+          "threshold_condition": "stride_forward_norm < 0.20",
+          "measured_key": "stride_extension_norm",
+          "ideal_range": "0.22 - 0.35 norm",
+          "unit": "body units",
+          "why_it_hurts": "Reaching with your hands away from your body without committing your front foot leaves you lunging, playing with an angled bat away from your eyes.",
+          "fix": "Commit a positive stride toward the line and bounce of the ball, planting your front toe pointing in the direction you want to hit.",
+          "drill": "Shadow Step & Freeze: Mark foot placement spots with chalk; practice taking a positive stride towards cover, landing heel-first then rolling onto the front sole while keeping your weight balanced."
+        },
+        "balance_loss_follow_through": {
+          "id": "CD_FLAW_05",
+          "name": "Loss of Balance on Follow-Through",
+          "affected_joint": "left_hip",
+          "severity": "medium",
+          "threshold_condition": "com_shift_after_impact > 10% or rear_leg_flail > 15%",
+          "measured_key": "balance_stability_score",
+          "ideal_range": "8.0 - 10.0 / 10",
+          "unit": "/10",
+          "why_it_hurts": "Toppling off-balance immediately after impact indicates you rushed the shot with upper body torque rather than a solid front knee base, giving poor control.",
+          "fix": "Hold your finish! Freeze in your follow-through position like a photograph until the ball has traveled 20 yards.",
+          "drill": "3-Second Pose Hold: After executing every drive, hold your finishing stance on your flexed front knee for a full 3 count without wobbling or moving your back toe."
+        },
+        "bottom_hand_takeover": {
+          "id": "CD_FLAW_06",
+          "name": "Bottom Hand Squeezing / Domination",
+          "affected_joint": "right_wrist",
+          "severity": "medium",
+          "threshold_condition": "wrist_cock_abruptness > 25%",
+          "measured_key": "bottom_hand_wrist_flex_pct",
+          "ideal_range": "5.0% - 15.0%",
+          "unit": "%",
+          "why_it_hurts": "Tightening the bottom hand rolls the wrists prematurely or fliffs the ball aerially, diminishing placement precision.",
+          "fix": "Relax your bottom hand grip: use only thumb and index finger (a 'V' grip) while letting your top hand grip firmly.",
+          "drill": "Loose Grip Check Drill: Practice front-foot push-drives gripping the handle with your bottom hand's thumb and index finger only, driving cleanly past mid-off."
+        }
+      }
+    }
+  }
+}
