@@ -261,3 +261,10 @@ Extending analysis to Straight Drive, Pull, Cut, Sweep, Flick, and Defense requi
 2. Open `backend/app/configs/flaws_drills.json`:
    - Add new flaw rules, "why it hurts" explanations, 1-line fixes, and prescribed drills.
 3. The engine automatically loads these rules dynamically!
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE) - see the [LICENSE](LICENSE) file for details.
+
