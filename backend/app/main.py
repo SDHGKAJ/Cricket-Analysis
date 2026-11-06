@@ -304,11 +304,13 @@ async def analyze_video_upload(
         frames_data = [{"frame_index": i, "timestamp_ms": i * 33.3, "landmarks": [{"x": 0.5, "y": 0.3, "z": 0.0}] * 33} for i in range(45)]
 
     # Merge YOLOv8n ball detections into frames so downstream analysis can use ball position
+    # ball_pos comes back as [x, y]; schema expects Dict[str, float] {"x": ..., "y": ...}
     try:
         tracking = object_tracker.track_objects_in_sequence(frames_data, video_path=str(saved_path))
         for i, track in enumerate(tracking):
             if i < len(frames_data) and track.get("ball_pos"):
-                frames_data[i]["ball_position"] = track["ball_pos"]
+                bx, by = track["ball_pos"]
+                frames_data[i]["ball_position"] = {"x": float(bx), "y": float(by)}
     except Exception:
         pass
 
