@@ -57,6 +57,7 @@ export interface ShotAnalysis {
   replay_url?: string;
   confidence?: number;
   delta_last_session?: number;
+  frames?: FrameLandmarks[];
 }
 
 export interface SessionRecord {

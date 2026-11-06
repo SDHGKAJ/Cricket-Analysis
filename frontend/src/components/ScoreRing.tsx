@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { Award, Zap, TrendingUp, TrendingDown, Minus } from 'lucide-react';
+import { Award, Zap } from 'lucide-react';
 
 interface ScoreRingProps {
   overallScore: number;
@@ -123,30 +123,13 @@ export const ScoreRing: React.FC<ScoreRingProps> = ({
       </div>
 
       {/* ── KPI strip ── */}
-      <div className="grid grid-cols-2 gap-2.5 pt-4 border-t border-white/6">
+      <div className="bg-slate-900/60 rounded-xl p-3 border border-white/5 pt-4 border-t border-white/6">
         {/* Timing */}
-        <div className="bg-slate-900/60 rounded-xl p-3 border border-white/5">
-          <div className="cv-label flex items-center gap-1 mb-1">
-            <Zap className="w-3 h-3 text-amber-400" /> Timing score
-          </div>
-          <div className="text-lg font-black font-numeric text-white">
-            {timingScore.toFixed(1)}<span className="text-[11px] font-normal text-slate-500"> / 10</span>
-          </div>
+        <div className="cv-label flex items-center gap-1 mb-1">
+          <Zap className="w-3 h-3 text-amber-400" /> Timing score
         </div>
-
-        {/* Delta vs last session */}
-        <div className="bg-slate-900/60 rounded-xl p-3 border border-white/5">
-          <div className="cv-label mb-1">vs. last session</div>
-          <div className="text-lg font-black font-numeric flex items-center gap-1.5">
-            {deltaLastSession > 0 ? (
-              <><TrendingUp className="w-4 h-4 text-emerald-400" /><span className="text-emerald-400">+{deltaLastSession.toFixed(1)}</span></>
-            ) : deltaLastSession < 0 ? (
-              <><TrendingDown className="w-4 h-4 text-rose-400" /><span className="text-rose-400">{deltaLastSession.toFixed(1)}</span></>
-            ) : (
-              <><Minus className="w-4 h-4 text-slate-400" /><span className="text-slate-400">–</span></>
-            )}
-            <span className="text-[11px] font-normal text-slate-500">pts</span>
-          </div>
+        <div className="text-lg font-black font-numeric text-white">
+          {timingScore.toFixed(1)}<span className="text-[11px] font-normal text-slate-500"> / 10</span>
         </div>
       </div>
     </div>

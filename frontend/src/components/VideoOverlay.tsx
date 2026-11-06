@@ -144,8 +144,7 @@ export const VideoOverlay: React.FC<VideoOverlayProps> = ({
     if (!frameData) return;
 
     ctx.clearRect(0, 0, width, height);
-    ctx.fillStyle = '#060A14';
-    ctx.fillRect(0, 0, width, height);
+    // Transparent canvas so the video plays behind the skeleton overlay
 
     const landmarks = frameData.landmarks;
     if (!landmarks || landmarks.length < 33) return;
@@ -366,17 +365,23 @@ export const VideoOverlay: React.FC<VideoOverlayProps> = ({
         </div>
 
         <div className="frame-content relative z-10 w-full h-full">
-          {replayVideoUrl ? (
+          {replayVideoUrl && (
             <video
               ref={videoRef}
+              autoPlay
               playsInline
               muted
+              loop
               className="w-full h-full object-contain"
               src={replayVideoUrl}
             />
-          ) : (
-            <canvas ref={canvasRef} width={640} height={360} className="w-full h-full object-contain" />
           )}
+          <canvas
+            ref={canvasRef}
+            width={640}
+            height={360}
+            className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+          />
         </div>
 
         {/* Telemetry stamp */}

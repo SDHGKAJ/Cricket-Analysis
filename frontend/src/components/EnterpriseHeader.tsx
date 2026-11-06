@@ -3,13 +3,12 @@ import { CameraAngle, BatterHand } from '../types/cricket';
 import {
   Settings2,
   Share2,
-  Radio,
   Sliders,
   ChevronDown,
   User,
-  Activity,
   Download,
-  Dumbbell
+  Dumbbell,
+  Radio
 } from 'lucide-react';
 
 interface EnterpriseHeaderProps {
@@ -17,8 +16,8 @@ interface EnterpriseHeaderProps {
   batterHand: BatterHand;
   onOpenSettings: () => void;
   onOpenDrillsModal: () => void;
-  activeModule: 'lab' | 'video' | 'drills';
-  onModuleChange: (mod: 'lab' | 'video' | 'drills') => void;
+  activeModule: 'video' | 'drills';
+  onModuleChange: (mod: 'video' | 'drills') => void;
   selectedPlayer: string;
   onPlayerChange: (player: string) => void;
   totalShots: number;
@@ -68,18 +67,6 @@ export const EnterpriseHeader: React.FC<EnterpriseHeaderProps> = ({
 
         {/* Center: Module Navigation Tabs */}
         <div className="flex items-center gap-1 bg-slate-900/90 p-1 rounded-xl border border-slate-800 text-xs font-semibold self-start md:self-auto">
-          <button
-            onClick={() => onModuleChange('lab')}
-            className={`px-3.5 py-1.5 rounded-lg transition-all flex items-center gap-1.5 ${
-              activeModule === 'lab'
-                ? 'bg-emerald-500 text-slate-950 font-bold shadow-sm'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <Activity className="w-3.5 h-3.5" />
-            Live Batting Lab
-          </button>
-
           <button
             onClick={() => onModuleChange('video')}
             className={`px-3.5 py-1.5 rounded-lg transition-all flex items-center gap-1.5 ${

@@ -60,7 +60,7 @@ export const VideoUploader: React.FC<VideoUploaderProps> = ({
           landmarks: Array.from({ length: 33 }, () => ({ x: 0.5, y: 0.5, z: 0, visibility: 0.99 })),
         }));
         const fallback = evaluateCoverDriveClient(frames, cameraAngle, batterHand);
-        onAnalysisComplete(fallback);
+        onAnalysisComplete({ ...fallback, frames });
       } catch {
         setUploadError(err.message || 'Failed to analyze uploaded video');
       }

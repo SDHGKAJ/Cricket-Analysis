@@ -226,7 +226,8 @@ def analyze_shot_sequence(data: AnalyzeShotSequenceRequest, db: Session = Depend
         tips=[TipItem(**t) for t in tips],
         impact_frame=impact_frame,
         total_frames=len(data.frames),
-        shot_id=shot_id
+        shot_id=shot_id,
+        frames=data.frames
     )
 
 @app.post("/api/analyze-video", response_model=ShotAnalysisResponse)

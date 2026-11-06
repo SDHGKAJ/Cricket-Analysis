@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Plus, ShieldAlert, Camera, Clock, Play } from 'lucide-react';
+import { Plus, ShieldAlert, Clock, Play } from 'lucide-react';
 import {
   CameraAngle,
   BatterHand,
@@ -15,7 +15,6 @@ import { SideNav } from './components/SideNav';
 import { ScoreRing } from './components/ScoreRing';
 import { RadarChart } from './components/RadarChart';
 import { VideoOverlay } from './components/VideoOverlay';
-import { LiveCameraFeed } from './components/LiveCameraFeed';
 import { VideoUploader } from './components/VideoUploader';
 import { FlawCard } from './components/FlawCard';
 import { DrillCard } from './components/DrillCard';
@@ -115,6 +114,7 @@ function makeDemoShot(cameraAngle: CameraAngle, batterHand: BatterHand): ShotAna
       drill: 'Shadow Step & Freeze: 30 repetitions committing the front stride toward a chalk target.',
     },
   ];
+  shot.replay_url = '/replays/replay_upload_3979b792_slowmo.mp4';
   return shot;
 }
 
@@ -200,8 +200,14 @@ export const App: React.FC = () => {
       .then((s) => setSessionId(s.id))
       .catch(() => {});
 
+    const demoFrames: FrameLandmarks[] = Array.from({ length: 48 }, (_, i) => ({
+      frame_index: i,
+      timestamp_ms: i * 33.3,
+      landmarks: Array.from({ length: 33 }, () => ({ x: 0.5, y: 0.5, z: 0, visibility: 0.99 })),
+    }));
     const demo = makeDemoShot(cameraAngle, batterHand);
     setActiveShot(demo);
+    setActiveFrames(demoFrames);
     setShotsHistory([demo]);
     setAppState('ready');
   }, []);
@@ -245,6 +251,7 @@ export const App: React.FC = () => {
 
   const handleVideoComplete = (result: ShotAnalysis) => {
     setActiveShot(result);
+    setActiveFrames(result.frames ?? []);
     setShotsHistory((prev) => [...prev, result]);
     setAppState('ready');
   };
@@ -315,75 +322,7 @@ export const App: React.FC = () => {
 
           <main className="max-w-screen-xl mx-auto px-4 lg:px-8 pt-6 pb-20 space-y-8">
 
-            {/* ═════════════════════════════════════════════════════════════
-                LIVE BATTING LAB — real-time telemetry + instant scoring
-                ══════════════════════════════════════════════════════════ */}
-            {(navActive === 'lab' || navActive === 'home') && (
-              <section className="space-y-6" aria-label="Live Batting Lab">
-                <div className="glass-panel rounded-2xl p-6 border border-slate-700/60 shadow-xl">
-                  <div className="flex items-center justify-between mb-4">
-                    <div>
-                      <h2 className="text-xl font-extrabold text-white tracking-tight">Live Batting Lab</h2>
-                      <p className="text-xs text-slate-400 mt-1">Real-time pose telemetry &amp; instant shot evaluation</p>
-                    </div>
-                    <button
-                      id="btn-lab-new-shot"
-                      onClick={handleReset}
-                      className="flex items-center gap-2 px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold border border-slate-700 transition-all"
-                    >
-                      <Plus className="w-3.5 h-3.5" /> Reset Session
-                    </button>
-                  </div>
 
-                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                    <div className="lg:col-span-2 space-y-4">
-                      <LiveCameraFeed
-                        cameraAngle={cameraAngle}
-                        batterHand={batterHand}
-                        onShotCompleted={handleShotCaptured}
-                        highlightJoint={selectedJoint}
-                        isAnalyzing={isAnalyzing}
-                      />
-                    </div>
-                    <div className="space-y-4">
-                      {activeShot ? (
-                        <>
-                          <ScoreRing
-                            overallScore={activeShot.overall_score}
-                            timingScore={activeShot.timing_score}
-                            shotType={activeShot.shot_type}
-                            confidence={activeShot.confidence}
-                            deltaLastSession={activeShot.delta_last_session}
-                          />
-                          {activeShot.flaws.length > 0 && (
-                            <div className="bg-rose-500/6 border border-rose-500/10 p-3 rounded-xl">
-                              <div className="flex items-center gap-2 mb-2">
-                                <ShieldAlert className="w-4 h-4 text-rose-400" />
-                                <span className="text-xs font-bold text-rose-200 uppercase tracking-wider">
-                                  Focus: {activeShot.flaws[0].name.split('/')[0]}
-                                </span>
-                              </div>
-                              <p className="text-xs text-slate-300 leading-relaxed">
-                                {activeShot.tips[0]?.fix || ''}
-                              </p>
-                            </div>
-                          )}
-                          <div className="text-xs text-slate-400 text-center px-3">
-                            Use the preset telemetry buttons inside Live Camera Feed above to instantly test stroke kinematics.
-                          </div>
-                        </>
-                      ) : (
-                        <div className="cv-card p-12 text-center">
-                          <Camera className="w-12 h-12 mx-auto mb-3 opacity-25 text-emerald-400" />
-                          <h4 className="text-sm font-bold text-white">No shot captured yet</h4>
-                          <p className="text-xs text-slate-400 mt-1">Start camera or load a preset telemetry stroke</p>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </section>
-            )}
 
             {/* ═════════════════════════════════════════════════════════════
                 VIDEO STUDIO — full analysis dashboard

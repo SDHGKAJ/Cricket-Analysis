@@ -18,7 +18,6 @@ interface TopBarProps {
 }
 
 const MODES = [
-  { id: 'lab', label: 'Live Batting Lab', icon: Radio },
   { id: 'video', label: 'Video Studio', icon: Aperture },
   { id: 'drills', label: 'Coach Drills', icon: Dumbbell },
 ] as const;
