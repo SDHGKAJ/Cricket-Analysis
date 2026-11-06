@@ -21,9 +21,10 @@ export interface FlawItem {
   name: string;
   severity: 'low' | 'medium' | 'high';
   frame: number;
-  measured: number;
-  ideal: string;
+  joint?: string;
   affected_joint?: string;
+  measured: number | string;
+  ideal: string;
 }
 
 export interface TipItem {
@@ -54,6 +55,8 @@ export interface ShotAnalysis {
   total_frames?: number;
   shot_id?: string;
   replay_url?: string;
+  confidence?: number;
+  delta_last_session?: number;
 }
 
 export interface SessionRecord {
@@ -65,4 +68,17 @@ export interface SessionRecord {
   shot_count: number;
   avg_score: number;
   shots?: ShotAnalysis[];
+}
+
+export interface DrillInfo {
+  id: string;
+  title: string;
+  duration: string;
+  reps: string;
+  equipment: string;
+  description: string;
+  flawName: string;
+  cue: string;
+  thumbnail: string;
+  category: string;
 }

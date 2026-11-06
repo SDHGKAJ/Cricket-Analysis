@@ -1,66 +1,354 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/* =========================================================
+   DESIGN TOKENS — edit here to retheme the entire product
+   ========================================================= */
 @layer base {
   :root {
-    --bg-main: #060911;
-    --card-surface: rgba(13, 20, 36, 0.75);
-    --border-subtle: rgba(255, 255, 255, 0.08);
+    /* Base surfaces — deep navy/charcoal (#0B1220 base) */
+    --bg-base: #0B1220;
+    --bg-surface: #0F172A;
+    --bg-card: #121B30;
+    --bg-card-elevated: #172136;
+    --bg-input: #0A1120;
+
+    /* Borders */
+    --border-subtle: rgba(255, 255, 255, 0.05);
+    --border-default: rgba(255, 255, 255, 0.08);
+    --border-hover: rgba(255, 255, 255, 0.12);
+    --border-active: rgba(16, 185, 129, 0.35);
+    --border-focus: rgba(16, 185, 129, 0.55);
+
+    /* Primary accent — Emerald / Teal */
+    --accent: #10B981;
+    --accent-dim: rgba(16, 185, 129, 0.12);
+    --accent-glow: rgba(16, 185, 129, 0.25);
+    --accent-border: rgba(16, 185, 129, 0.35);
+
+    /* Secondary accent — Purple / Violet (skeleton + action buttons) */
+    --accent-purple: #8B5CF6;
+    --accent-purple-dim: rgba(139, 92, 246, 0.12);
+    --accent-purple-glow: rgba(139, 92, 246, 0.25);
+    --accent-purple-border: rgba(139, 92, 246, 0.35);
+
+    /* Semantic: green 8–10 */
+    --semantic-green: #10B981;
+    --semantic-green-bg: rgba(16, 185, 129, 0.10);
+    --semantic-green-border: rgba(16, 185, 129, 0.28);
+    --semantic-green-text: #34D399;
+
+    /* Semantic: amber 5–7.9 */
+    --semantic-amber: #F59E0B;
+    --semantic-amber-bg: rgba(245, 158, 11, 0.10);
+    --semantic-amber-border: rgba(245, 158, 11, 0.28);
+    --semantic-amber-text: #FCD34D;
+
+    /* Semantic: red < 5 */
+    --semantic-red: #EF4444;
+    --semantic-red-bg: rgba(239, 68, 68, 0.10);
+    --semantic-red-border: rgba(239, 68, 68, 0.28);
+    --semantic-red-text: #F87171;
+
+    /* Sky / info */
+    --semantic-sky: #38BDF8;
+    --semantic-sky-bg: rgba(56, 189, 248, 0.10);
+
+    /* 8px grid spacing */
+    --sp-1: 8px;
+    --sp-2: 16px;
+    --sp-3: 24px;
+    --sp-4: 32px;
+    --sp-6: 48px;
+    --sp-8: 64px;
+
+    /* Border radii */
+    --r-sm: 10px;
+    --r-md: 12px;
+    --r-lg: 16px;
+    --r-xl: 20px;
+    --r-2xl: 24px;
+    --r-3xl: 32px;
+
+    /* Type scale — body minimum 14px */
+    --text-xs: 12px;
+    --text-sm: 13px;
+    --text-base: 14px;
+    --text-md: 16px;
+    --text-lg: 20px;
+    --text-xl: 24px;
+    --text-2xl: 32px;
+    --text-hero: 56px;
+  }
+
+  html {
+    scroll-behavior: smooth;
   }
 
   body {
-    background: radial-gradient(130% 100% at 50% 0%, #0F172A 0%, #080D1A 40%, #04060C 100%);
-    color: #F8FAFC;
+    background-color: var(--bg-base);
+    background-image:
+      radial-gradient(ellipse 100% 60% at 50% 0%, rgba(16, 185, 129, 0.03) 0%, transparent 60%),
+      radial-gradient(ellipse 80% 40% at 80% 100%, rgba(56, 189, 248, 0.02) 0%, transparent 50%);
+    color: #E8F0F8;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: var(--text-base);
+    line-height: 1.6;
     min-height: 100vh;
-    overflow-x: hidden;
-    font-family: 'Outfit', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-    letter-spacing: -0.01em;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Numeric values only — JetBrains Mono */
+  .font-numeric {
+    font-family: 'JetBrains Mono', monospace;
+    font-variant-numeric: tabular-nums;
   }
 }
 
-/* Enterprise Sports Card Surface */
-.enterprise-card {
-  background: linear-gradient(145deg, rgba(17, 24, 39, 0.78) 0%, rgba(10, 15, 29, 0.92) 100%);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+/* ===========================
+   CARD SYSTEM
+   =========================== */
+@layer components {
+  .cv-card {
+    background: linear-gradient(145deg,
+      rgba(18, 27, 48, 0.92) 0%,
+      rgba(10, 17, 30, 0.97) 100%);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    border: 1px solid var(--border-default);
+    border-radius: var(--r-xl);
+    box-shadow:
+      0 20px 44px -14px rgba(0, 0, 0, 0.50),
+      inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+  }
+
+  .cv-card:hover {
+    border-color: var(--border-hover);
+  }
+
+  .cv-card-active {
+    border-color: var(--border-active);
+    box-shadow:
+      0 0 0 1px var(--border-active),
+      0 0 30px -4px var(--accent-glow),
+      0 20px 44px -14px rgba(0, 0, 0, 0.50),
+      inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  }
+
+  .cv-card-elevated {
+    border-radius: var(--r-2xl);
+    box-shadow: 0 24px 48px -16px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.04);
+  }
+
+  /* Section label */
+  .cv-label {
+    font-size: var(--text-xs);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: #64748B;
+  }
+
+  .cv-heading {
+    font-size: var(--text-md);
+    font-weight: 800;
+    color: #F8FAFC;
+    letter-spacing: -0.02em;
+  }
+
+  /* Semantic badge */
+  .cv-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 800;
+    font-family: 'JetBrains Mono', monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border: 1px solid;
+    white-space: nowrap;
+  }
+  .cv-badge-green  { background: var(--semantic-green-bg);  color: var(--semantic-green-text);  border-color: var(--semantic-green-border); }
+  .cv-badge-amber  { background: var(--semantic-amber-bg);  color: var(--semantic-amber-text);  border-color: var(--semantic-amber-border); }
+  .cv-badge-red    { background: var(--semantic-red-bg);    color: var(--semantic-red-text);    border-color: var(--semantic-red-border); }
+  .cv-badge-sky    { background: var(--semantic-sky-bg);    color: var(--semantic-sky);         border-color: rgba(56,189,248,0.30); }
+  .cv-badge-outline {
+    background: transparent;
+    color: #94A3B8;
+    border-color: var(--border-default);
+  }
+
+  /* Icon container */
+  .cv-icon-wrap {
+    width: 34px;
+    height: 34px;
+    border-radius: var(--r-md);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(16, 185, 129, 0.10);
+    border: 1px solid rgba(16, 185, 129, 0.22);
+    color: var(--accent);
+    flex-shrink: 0;
+  }
+
+  /* Severity dot */
+  .cv-severity-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    border: 1.5px solid #0B1220;
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.9);
+  }
+  .cv-severity-dot.red   { background: var(--semantic-red); }
+  .cv-severity-dot.amber { background: var(--semantic-amber); }
+  .cv-severity-dot.green { background: var(--semantic-green); }
+
+  /* Section header */
+  .cv-section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--sp-3);
+    padding-bottom: var(--sp-1);
+    border-bottom: 1px solid var(--border-default);
+  }
 }
 
-.enterprise-card-active {
-  background: linear-gradient(145deg, rgba(16, 29, 49, 0.9) 0%, rgba(9, 17, 32, 0.95) 100%);
-  backdrop-filter: blur(20px);
-  border: 1px solid rgba(16, 185, 129, 0.35);
-  box-shadow: 0 0 35px -5px rgba(16, 185, 129, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+/* ===========================
+   TECH GRID BACKGROUND
+   =========================== */
+.bg-tech-grid {
+  background-image:
+    linear-gradient(to right, rgba(255,255,255,0.02) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255,255,255,0.02) 1px, transparent 1px);
+  background-size: 32px 32px;
 }
 
-.hud-panel {
-  background: rgba(6, 10, 20, 0.85);
-  backdrop-filter: blur(14px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+/* ===========================
+   ANIMATED SCORE RING
+   =========================== */
+@keyframes ringFill {
+  0%   { stroke-dashoffset: 339; }
+  100% { stroke-dashoffset: var(--ring-offset, 0); }
+}
+.ring-animated {
+  animation: ringFill 1.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
-/* Broadcast Telemetry Grid */
-.broadcast-grid {
-  background-image: 
-    linear-gradient(to right, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
-  background-size: 28px 28px;
+/* ===========================
+   BAR GROW ANIMATION
+   =========================== */
+@keyframes barGrow {
+  from  { width: 0%; transform: translateX(-100%); }
+  to    { width: var(--bar-width, 0%); transform: translateX(0); }
+}
+.bar-animated {
+  animation: barGrow 0.9s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
-/* Custom Scrollbar */
-::-webkit-scrollbar {
-  width: 5px;
-  height: 5px;
+/* ===========================
+   FADE-IN SLIDE-UP
+   =========================== */
+@keyframes fadeSlideUp {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
-::-webkit-scrollbar-track {
-  background: #05070D;
+.fade-in {
+  animation: fadeSlideUp 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
-::-webkit-scrollbar-thumb {
-  background: #1E293B;
-  border-radius: 9999px;
+.fade-in-delay-1 { animation-delay: 0.08s; }
+.fade-in-delay-2 { animation-delay: 0.16s; }
+.fade-in-delay-3 { animation-delay: 0.24s; }
+
+/* ===========================
+   FLAW JOINT PULSE
+   =========================== */
+@keyframes flawPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55); }
+  60%       { box-shadow: 0 0 0 12px rgba(239, 68, 68, 0); }
 }
-::-webkit-scrollbar-thumb:hover {
-  background: #334155;
+.pulse-flaw {
+  animation: flawPulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes dash {
+  to { stroke-dashoffset: 0; }
+}
+
+/* ===========================
+   CUSTOM SCROLLBAR
+   =========================== */
+::-webkit-scrollbar          { width: 6px; height: 6px; }
+::-webkit-scrollbar-track    { background: transparent; }
+::-webkit-scrollbar-thumb    { background: rgba(255,255,255,0.10); border-radius: 999px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.18); }
+
+/* ===========================
+   RANGE INPUT
+   =========================== */
+input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: rgba(255,255,255,0.07);
+  border-radius: 99px;
+  outline: none;
+  cursor: pointer;
+}
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.25);
+  cursor: pointer;
+}
+input[type='range']::-webkit-slider-thumb:hover {
+  box-shadow: 0 0 0 5px rgba(16, 185, 129, 0.35);
+}
+
+/* ===========================
+   REDUCED MOTION
+   =========================== */
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ===========================
+   UTILITY: aspect video frame
+   =========================== */
+.aspect-video-frame {
+  position: relative;
+  width: 100%;
+  height: 0;
+  padding-bottom: 56.25%; /* 16:9 */
+  background: #060A14;
+  border-radius: var(--r-2xl);
+  overflow: hidden;
+  border: 1px solid var(--border-default);
+  box-shadow: 0 24px 48px -16px rgba(0,0,0,0.6);
+}
+.aspect-video-frame .frame-content {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #060A14;
 }

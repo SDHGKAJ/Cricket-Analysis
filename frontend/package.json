@@ -12,9 +12,11 @@
     "@mediapipe/camera_utils": "0.3.1675466862",
     "@mediapipe/pose": "0.5.1675469404",
     "clsx": "^2.1.1",
+    "framer-motion": "^14.9.0",
     "lucide-react": "^0.344.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
+    "recharts": "^3.10.1",
     "tailwind-merge": "^2.2.1"
   },
   "devDependencies": {

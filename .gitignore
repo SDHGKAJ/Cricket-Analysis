@@ -59,3 +59,15 @@ yarn-error.log*
 .idea/
 .DS_Store
 Thumbs.db
+
+# Trained models & weights (binaries — regenerate via training scripts)
+*.onnx
+*.pt
+*.pth
+
+# Dataset & extracted features
+Cricket-Ball-Detection-1/
+backend/shot_features/
+
+# Training outputs & runs
+runs/

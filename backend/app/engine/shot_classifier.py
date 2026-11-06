@@ -111,7 +111,7 @@ class MLShotClassifier(BaseShotClassifier):
             inputs = {self.session.get_inputs()[0].name: input_data}
             outputs = self.session.run(None, inputs)
             logits = outputs[0][0]
-            classes = ["cover_drive", "straight_drive", "pull_shot", "cut_shot", "forward_defense", "sweep_shot", "flick_shot"]
+            classes = ["cover_drive", "cut_shot", "flick_shot", "forward_defense", "pull_shot", "straight_drive", "sweep_shot"]
             pred_idx = int(np.argmax(logits))
             confidence = float(np.max(np.exp(logits) / np.sum(np.exp(logits))))
             return classes[pred_idx], round(confidence, 2)

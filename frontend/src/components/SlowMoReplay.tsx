@@ -8,6 +8,9 @@ interface SlowMoReplayProps {
   impactFrame?: number;
   replayVideoUrl?: string;
   selectedJoint?: string | null;
+  /** Optionally drive the frame from outside (PhaseTimeline, Fix-flaw button) */
+  externalFrame?: number;
+  onFrameChange?: (frame: number) => void;
 }
 
 const POSE_CONNECTIONS: [number, number][] = [
@@ -24,12 +27,22 @@ export const SlowMoReplay: React.FC<SlowMoReplayProps> = ({
   flaws,
   impactFrame = 0,
   replayVideoUrl,
-  selectedJoint
+  selectedJoint,
+  externalFrame,
+  onFrameChange,
 }) => {
   const [currentFrameIndex, setCurrentFrameIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(0.25);
   const [showAngles, setShowAngles] = useState(true);
+
+  // Sync with external frame controller (PhaseTimeline, Fix-flaw CTA)
+  useEffect(() => {
+    if (externalFrame !== undefined && externalFrame !== currentFrameIndex) {
+      setCurrentFrameIndex(externalFrame);
+      setIsPlaying(false);
+    }
+  }, [externalFrame]);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animRef = useRef<number | null>(null);
@@ -305,10 +318,12 @@ export const SlowMoReplay: React.FC<SlowMoReplayProps> = ({
           max={frames.length - 1}
           value={currentFrameIndex}
           onChange={(e) => {
-            setCurrentFrameIndex(Number(e.target.value));
+            const f = Number(e.target.value);
+            setCurrentFrameIndex(f);
             setIsPlaying(false);
+            onFrameChange?.(f);
           }}
-          className="w-full h-2 bg-slate-900 rounded-lg appearance-none cursor-pointer accent-emerald-500 border border-slate-800"
+          className="w-full h-2 rounded-lg appearance-none cursor-pointer"
         />
 
         {/* Phase Timeline Badges */}

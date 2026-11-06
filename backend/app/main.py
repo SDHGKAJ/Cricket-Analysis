@@ -37,6 +37,11 @@ from .engine.slowmo_generator import SlowMoReplayGenerator
 # Initialize database tables
 Base.metadata.create_all(bind=engine)
 
+# Auto-select ML shot classifier when the trained ONNX model is available,
+# otherwise fall back to the rule-based classifier.
+SHOT_CLASSIFIER_ONNX = BASE_DIR / "cricket_shot_classifier.onnx"
+SHOT_CLASSIFIER_MODE = "ml" if SHOT_CLASSIFIER_ONNX.exists() else "rule_based"
+
 app = FastAPI(
     title="Cricket Batting Biomechanics & Shot Analysis API",
     description="Real-time Pose Estimation, YOLO Tracking, Flaw Detection, and Coaching Engine",
@@ -173,7 +178,7 @@ def analyze_shot_sequence(data: AnalyzeShotSequenceRequest, db: Session = Depend
     impact_frame = segmentation.get("impact_frame", len(frame_dicts) // 2)
 
     # 2. Shot Classification (Swappable Rule-Based or ML)
-    classifier = get_shot_classifier(mode="rule_based")
+    classifier = get_shot_classifier(mode=SHOT_CLASSIFIER_MODE)
     predicted_shot, conf = classifier.classify(frame_dicts, segmentation, batter_hand=data.batter_hand)
 
     # In MVP, prioritize Cover Drive analysis
@@ -297,6 +302,15 @@ async def analyze_video_upload(
     except Exception as e:
         # Fallback frames if OpenCV fails
         frames_data = [{"frame_index": i, "timestamp_ms": i * 33.3, "landmarks": [{"x": 0.5, "y": 0.3, "z": 0.0}] * 33} for i in range(45)]
+
+    # Merge YOLOv8n ball detections into frames so downstream analysis can use ball position
+    try:
+        tracking = object_tracker.track_objects_in_sequence(frames_data, video_path=str(saved_path))
+        for i, track in enumerate(tracking):
+            if i < len(frames_data) and track.get("ball_pos"):
+                frames_data[i]["ball_position"] = track["ball_pos"]
+    except Exception:
+        pass
 
     # Run analysis
     req = AnalyzeShotSequenceRequest(
