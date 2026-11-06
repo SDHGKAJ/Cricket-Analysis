@@ -308,12 +308,10 @@ export const App: React.FC = () => {
           <TopBar
             cameraAngle={cameraAngle}
             batterHand={batterHand}
-            selectedPlayer={playerName}
             activeMode={navActive}
             onModeChange={setNavActive}
             onCameraAngleChange={setCameraAngle}
             onBatterHandChange={setBatterHand}
-            onPlayerChange={() => setPlayerName(p => (p === 'CC Ludimos' ? 'Steve Smith' : 'CC Ludimos'))}
             totalShots={shotsHistory.length}
             onNewShot={handleReset}
             onAnalyze={handleShotCaptured}

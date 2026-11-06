@@ -5,12 +5,10 @@ import { Settings2, Radio, Dumbbell, User, Plus, Aperture } from 'lucide-react';
 interface TopBarProps {
   cameraAngle: CameraAngle;
   batterHand: BatterHand;
-  selectedPlayer: string;
   activeMode: string;
   onModeChange: (mode: string) => void;
   onCameraAngleChange: (angle: CameraAngle) => void;
   onBatterHandChange: (hand: BatterHand) => void;
-  onPlayerChange: (player: string) => void;
   totalShots: number;
   onNewShot: () => void;
   onAnalyze: (frames: any[]) => void;
@@ -25,12 +23,10 @@ const MODES = [
 export const TopBar: React.FC<TopBarProps> = ({
   cameraAngle,
   batterHand,
-  selectedPlayer,
   activeMode,
   onModeChange,
   onCameraAngleChange,
   onBatterHandChange,
-  onPlayerChange,
   totalShots,
   onNewShot,
   onAnalyze,
@@ -90,29 +86,6 @@ export const TopBar: React.FC<TopBarProps> = ({
 
         {/* ── Right controls ── */}
         <div className="flex items-center gap-2">
-          {/* Player selector */}
-          <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-950/70 border border-white/6 text-xs">
-            <User className="w-3.5 h-3.5 text-emerald-400" />
-            <select
-              value={selectedPlayer}
-              onChange={(e) => onPlayerChange(e.target.value)}
-              className="bg-transparent text-slate-200 font-semibold text-xs focus:outline-none cursor-pointer"
-            >
-              <option value="Virat Kohli (RHB #18)" className="bg-slate-900 text-white">
-                Virat Kohli (RHB #18)
-              </option>
-              <option value="Steve Smith (RHB #49)" className="bg-slate-900 text-white">
-                Steve Smith (RHB #49)
-              </option>
-              <option value="Rohit Sharma (RHB #45)" className="bg-slate-900 text-white">
-                Rohit Sharma (RHB #45)
-              </option>
-              <option value="Custom Academy Batter" className="bg-slate-900 text-white">
-                Custom Academy Batter
-              </option>
-            </select>
-          </div>
-
           {/* Camera angle + handedness chips */}
           <div className="flex items-center gap-2">
             <button
