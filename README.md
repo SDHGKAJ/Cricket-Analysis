@@ -7,10 +7,10 @@ An end-to-end Computer Vision & Full-Stack web application that analyzes a batsm
 ## 🏗️ Architecture & Folder Structure
 
 ```
-Cricket-Analysys/
+Cricket-Analysis/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py                     # FastAPI server with WebSocket & REST endpoints
+│   │   ├── main.py                     # FastAPI server with REST & WebSocket endpoints
 │   │   ├── config.py                   # App configuration and paths loader
 │   │   ├── database.py                 # SQLite database engine and sessionmaker
 │   │   ├── models/
@@ -21,13 +21,13 @@ Cricket-Analysys/
 │   │   │   ├── shot_segmentation.py    # Backlift apex, downswing acceleration & impact detection
 │   │   │   ├── metrics_calculator.py   # Computes 8 biomechanical metrics & diagnostics
 │   │   │   ├── flaw_detector.py        # Rule-based flaw evaluator & coach advice generator
-│   │   │   ├── shot_classifier.py      # Swappable Rule-Based and ONNX ML Classifier
-│   │   │   ├── yolo_tracker.py         # Bat & ball YOLO detector with kinematic fallback
+│   │   │   ├── shot_classifier.py      # Swappable Rule-Based + ONNX ML Classifier (auto-selects ONNX if present)
+│   │   │   ├── yolo_tracker.py         # YOLOv8n ONNX ball detection + kinematic bat proxy, per-frame method tagging
 │   │   │   └── slowmo_generator.py     # Slow-motion video annotator (0.25x / 0.5x)
 │   │   └── configs/                    # Editable configuration files
 │   │       ├── shots_config.json       # Ideal angles, tolerances, and metric weights per shot
 │   │       └── flaws_drills.json       # Coach advice, "why it hurts", fixes, and drills
-│   ├── datasets/                       # Remote dataset loaders (never assumes local files)
+│   ├── datasets/                       # Remote dataset loaders (streaming, no local file assumptions)
 │   │   ├── cricshot10_loader.py        # CricShot10 GitHub manifest & mirror loader
 │   │   ├── huggingface_loader.py       # vicky521/cricket-shot streaming dynamic schema loader
 │   │   ├── kaggle_loader.py            # aneesh10/cricket-shot-dataset Kaggle API downloader
@@ -46,24 +46,41 @@ Cricket-Analysys/
 │   │   ├── components/
 │   │   │   ├── LiveCameraFeed.tsx      # High-FPS webcam stream with 33-landmark canvas overlay
 │   │   │   ├── ScoreCard.tsx           # Overall /10 score, timing subscore, metric breakdown
-│   │   │   ├── FlawList.tsx            # Flaw cards with severity, frame #, measured vs ideal
+│   │   │   ├── ScoreRing.tsx           # Animated circular score gauge (ring-fill animation)
+│   │   │   ├── RadarChart.tsx          # Recharts biomechanics radar chart
+│   │   │   ├── RadarChartComponent.tsx # Recharts radar sub-component
+│   │   │   ├── FlawCard.tsx            # Flaw cards with severity, frame #, measured vs ideal
+│   │   │   ├── FlawList.tsx            # Legacy flaw list component
+│   │   │   ├── DrillCard.tsx           # Drill prescription cards with duration / reps
 │   │   │   ├── ImprovementCoach.tsx    # Coach cues: Why it hurts, 1-line fix, practice drills
-│   │   │   ├── SlowMoReplay.tsx        # Interactive canvas slow-mo player with angle arcs
+│   │   │   ├── SlowMoReplay.tsx        # Interactive canvas slow-mo player + external frame control
 │   │   │   ├── SessionDashboard.tsx    # Session analytics, score progression, and shot history
-│   │   │   ├── VideoUploader.tsx       # Drag-and-drop clip uploader for heavy CV processing
-│   │   │   └── ViewSettingsModal.tsx   # Camera perspective & batter stance switcher
+│   │   │   ├── VideoOverlay.tsx        # Video frame overlay with phase timeline & joint highlighting
+│   │   │   ├── VideoUploader.tsx       # Drag-and-drop clip uploader + client-side offline fallback
+│   │   │   ├── SideNav.tsx             # Enterprise sidebar navigation
+│   │   │   ├── TopBar.tsx              # Top navigation bar with camera / batter controls
+│   │   │   ├── StickyMiniHeader.tsx    # Sticky score + shot type header on scroll
+│   │   │   ├── PhaseTimeline.tsx       # Stroke phase timeline badges
+│   │   │   ├── StateViews.tsx          # Empty / Analyzing / Error / NoFlaws / Live mode views
+│   │   │   ├── EnterpriseHeader.tsx    # Legacy enterprise header
+│   │   │   ├── TelemetryHub.tsx        # Legacy telemetry hub
+│   │   │   ├── ViewSettingsModal.tsx   # Legacy camera/batter settings modal
+│   │   │   └── DrillPlaybookModal.tsx  # Legacy drill playbook modal
 │   │   ├── services/
 │   │   │   ├── api.ts                  # Backend REST client
 │   │   │   └── clientShotEvaluator.ts  # Client-side instantaneous (<50ms) kinematics evaluator
 │   │   ├── types/
 │   │   │   └── cricket.ts              # Data contracts and TypeScript interfaces
-│   │   ├── App.tsx                     # Main dashboard orchestrator
-│   │   ├── index.css                   # Tailwind styles, glassmorphism, glowing accents
+│   │   ├── App.tsx                     # Main dashboard orchestrator (empty / analyzing / error / ready states)
+│   │   ├── index.css                   # Design tokens, semantic badges, CSS animations
 │   │   └── main.tsx
-│   ├── package.json
+│   ├── package.json                    # deps: framer-motion, recharts added
 │   ├── vite.config.ts
 │   └── tailwind.config.js
-└── README.md
+├── train_yolo.py                       # Root-level YOLOv8n ball detector training script (+ ONNX export)
+├── train_shot_classifier.py            # Root-level shot classifier ONNX training script
+├── README.md
+└── LICENSE
 ```
 
 ---
@@ -93,6 +110,27 @@ Cricket-Analysys/
    - `Front Foot Not to the Pitch of the Ball`
    - `Loss of Balance on Follow-Through`
    - `Bottom Hand Squeezing / Domination`
+
+---
+
+## ✨ What's New (Latest Release)
+
+### Enterprise UI Upgrade
+- **New layout shell**: `SideNav` + `TopBar` + `StickyMiniHeader` with glass-panel cards, semantic badges, and smooth page transitions.
+- **New components**: `ScoreRing` (animated circular gauge), `RadarChart` (8-metric biomechanics radar), `FlawCard` (severity-tagged flaw cards), `DrillCard` (practice drill prescriptions), `MetricBreakdown`, `HistoryChart`, `PhaseTimeline`, `VideoOverlay`, `StateViews` (Empty / Analyzing / Error / NoFlaws / Live modes).
+- **State-driven dashboard**: App modes (`empty` → `analyzing` → `error` → `ready`) with demo shot data and a drill library so the UI is rich and interactive immediately.
+- **Animations**: CSS design tokens plus `ring-fill`, `bar-grow`, `fade-in`, and `flaw-pulse` keyframes; `framer-motion` and `recharts` added to dependencies.
+- **VideoUploader**: client-side offline fallback runs the client shot evaluator when the backend is unreachable.
+
+### ML Classifier Auto-Selection
+- `shot_classifier.py` now auto-selects the ONNX ML classifier when `cricket_shot_classifier.onnx` is present, falling back to the rule-based classifier otherwise. Controlled from `backend/app/main.py` via `SHOT_CLASSIFIER_MODE`.
+
+### YOLOv8n Ball Tracking
+- `yolo_tracker.py` refactored to YOLOv8n ONNX ball detection (`cricket_yolo.onnx`, 1 class: `cricketball`) with a kinematic wrist-anchored bat proxy fallback. Each frame carries a `method` tag (`yolov8_ball_kinematic_bat`, `yolov8_ball_only`, `kinematic_bat_proxy`, `unavailable`).
+- Ball detections are merged into analysis frames in `/api/analyze-video` so downstream metrics can use ball position.
+
+### Git Hygiene
+- Trained model weights (`*.onnx`, `*.pt`, `*.pth`), the `Cricket-Ball-Detection-1/` dataset, `backend/shot_features/`, and `runs/` are now gitignored and regenerated via `train_yolo.py` / `train_shot_classifier.py`.
 
 ---
 
@@ -165,6 +203,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 The backend API docs are available at: `http://localhost:8000/docs`.
 
+> **ML classifier auto-selection**: `main.py` checks for `cricket_shot_classifier.onnx` at startup. If present, the ONNX `MLShotClassifier` is used; otherwise the rule-based `RuleBasedShotClassifier` runs automatically. Generate the ONNX weights with `train_shot_classifier.py` (root) or `backend/notebooks/train_shot_classifier.ipynb`.
+
 ### 2. Frontend (React + Vite + Tailwind)
 Requires Node.js 18+.
 
@@ -172,13 +212,18 @@ Requires Node.js 18+.
 # Navigate to frontend directory
 cd frontend
 
-# Install packages
+# Install packages (includes framer-motion + recharts for animations & charts)
 npm install
+
+# Type-check
+npx tsc --noEmit
 
 # Start Vite dev server
 npm run dev
 ```
 Open your browser at `http://localhost:5173`.
+
+> **Note on model weights**: Trained ONNX / PyTorch weights (`cricket_yolo.onnx`, `cricket_shot_classifier.onnx`, `*.pt`, `*.pth`) are **gitignored** and not shipped in the repo. The app runs in rule-based + kinematic-fallback mode out of the box. Generate weights with `train_yolo.py` / `train_shot_classifier.py` (or the Colab notebooks in `backend/notebooks/`) and place `cricket_yolo.onnx` / `cricket_shot_classifier.onnx` at the repo root to unlock ML-powered detection and classification.
 
 ---
 
@@ -239,8 +284,9 @@ Because no public quality rating dataset exists for cricket batting biomechanics
 
 ## 🧠 Training & Exporting Models (Google Colab / Kaggle)
 
-The `backend/notebooks/` directory contains self-contained Jupyter notebooks with free GPU acceleration:
+Train and export models either via the Colab/Kaggle notebooks or the root-level Python scripts:
 
+**Notebooks (`backend/notebooks/`):**
 1. **`train_cricket_yolo.ipynb`**:
    - Fine-tunes YOLOv8 on Roboflow cricket bat and ball datasets.
    - Evaluates mAP50 / mAP50-95.
@@ -249,6 +295,12 @@ The `backend/notebooks/` directory contains self-contained Jupyter notebooks wit
    - Streams clips from Hugging Face & CricShot10.
    - Trains a Temporal Bidirectional GRU network on 33 MediaPipe landmark trajectories.
    - Exports the classifier model to **ONNX** (`cricket_shot_classifier.onnx`) to slot into the swappable `MLShotClassifier` in `app/engine/shot_classifier.py`.
+
+**Root-level scripts (alternative to notebooks):**
+- `train_yolo.py` — trains the YOLOv8n ball detector and exports `cricket_yolo.onnx`.
+- `train_shot_classifier.py` — trains the shot classifier and exports `cricket_shot_classifier.onnx`.
+
+Place exported `cricket_yolo.onnx` / `cricket_shot_classifier.onnx` at the repo root; the backend auto-detects them at startup.
 
 ---
 
