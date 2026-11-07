@@ -27,6 +27,9 @@ class ShotAnalysisResponse(BaseModel):
     shot_id: Optional[str] = None
     replay_url: Optional[str] = None
     pose_video_url: Optional[str] = None
+    cricket_video_url: Optional[str] = None
+    cricket_report_url: Optional[str] = None
+    feedback: List[str] = []
     frames: List[FrameLandmarks] = []
 
 class LandmarkPoint(BaseModel):

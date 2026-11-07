@@ -34,6 +34,7 @@ from .engine.shot_classifier import get_shot_classifier
 from .engine.yolo_tracker import CricketObjectTracker
 from .engine.slowmo_generator import SlowMoReplayGenerator
 from .engine.pose_overlay import analyze_video as analyze_pose_overlay
+from .engine.cricket_analyzer import analyze_cricket_shot
 
 # Initialize database tables
 Base.metadata.create_all(bind=engine)
@@ -344,6 +345,19 @@ async def analyze_video_upload(
         result.pose_video_url = f"/outputs/{pose_out.name}"
     except Exception:
         pass  # pose overlay is best-effort; analysis result is still returned
+
+    # Cricket-specific shot analysis: HUD-annotated video + JSON report + feedback
+    try:
+        cricket_out = OUTPUT_DIR / f"cricket_{file_id}.mp4"
+        report = analyze_cricket_shot(
+            str(saved_path), str(cricket_out),
+            shot_direction=None, batter_hand=batter_hand,
+        )
+        result.cricket_video_url = f"/outputs/{cricket_out.name}"
+        result.cricket_report_url = f"/outputs/{cricket_out.stem}.json"
+        result.feedback = report.get("feedback", [])
+    except Exception:
+        pass  # cricket analysis is best-effort; rest of the result is still returned
 
     return result
 

@@ -372,6 +372,47 @@ export const App: React.FC = () => {
                   />
                 )}
 
+                {/* Cricket shot analysis: HUD-annotated video + feedback list */}
+                {activeShot?.cricket_video_url && (
+                  <div className="glass-panel rounded-2xl overflow-hidden border border-white/8 fade-in">
+                    <div className="flex items-center justify-between px-4 py-3 border-b border-white/6">
+                      <div className="flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                        <h4 className="text-xs font-bold text-white">Shot Analysis</h4>
+                        <span className="text-[10px] text-slate-500 font-numeric">HUD · weight · contact · phases</span>
+                      </div>
+                      {activeShot.cricket_report_url && (
+                        <a
+                          href={activeShot.cricket_report_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-bold text-slate-300 hover:text-white transition-all"
+                        >
+                          JSON report
+                        </a>
+                      )}
+                    </div>
+                    <video
+                      src={activeShot.cricket_video_url}
+                      controls
+                      autoPlay
+                      playsInline
+                      muted
+                      className="w-full max-h-[70vh] bg-black object-contain"
+                    />
+                    {activeShot.feedback && activeShot.feedback.length > 0 && (
+                      <ul className="px-4 py-3 space-y-1.5 border-t border-white/6">
+                        {activeShot.feedback.map((line, i) => (
+                          <li key={i} className="flex items-start gap-2 text-[11px] text-slate-300">
+                            <span className="mt-1 w-1 h-1 rounded-full bg-emerald-400/80 shrink-0" />
+                            {line}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+
                 {/* Backend unavailable → explain why no annotated video */}
                 {poseMissing && (
                   <p className="text-[11px] text-amber-400/80 text-center">
