@@ -69,6 +69,8 @@ CONFIG: Dict[str, Any] = {
     "traj_body_dist_ratio": 0.35,   # ball must be within this*min(w,h) of bat/body at turn
     "ball_min_dets": 6,             # min detections before a ball track can be trusted
     "ball_max_curv_ratio": 0.06,    # median 2nd-diff of track <= this*min(w,h) (smoothness)
+    "ball_teleport_ratio": 0.25,    # consecutive jump > ratio*min(w,h) counts as a teleport
+    "ball_max_teleports": 5,        # more teleports than this = cluster-hopping false positive
     # -- 5. eye focus -------------------------------------------------------
     "eye_on_ball_deg": 15.0,        # gaze vs head-to-ball angle < 15° -> eyes on ball
     "eye_away_deg": 30.0,           # angle > 30° sustained -> head turned away
@@ -277,6 +279,11 @@ def _choose_front_foot(det, batter_hand: str, cfg) -> Dict[str, Any]:
         "coco_ba": COCO_R_ANK if ba == MP_R_ANK else COCO_L_ANK,
         "used_foot": "right" if fa == MP_R_ANK else "left",
         "source": source,
+        # lowest (largest y) position of the chosen front ankle = ground level
+        "ground_y": max((float(xy[fa][1]) for xy, vis in
+                         zip(det["mp_xy"], det["mp_vis"])
+                         if xy is not None and vis[fa] >= CONF_THRESHOLD),
+                        default=None),
     }
 
 
@@ -338,8 +345,14 @@ def _front_foot_metric(det, contact: Optional[int], shot_dir: Optional[float],
     fa_mp, knee_mp, toe_mp, heel_mp = feet["fa"], feet["knee"], feet["toe"], feet["heel"]
     base = {"used_foot": feet["used_foot"], "foot_source": feet["source"]}
 
-    angles: List[float] = []
+    angles: List[float] = []       # planted frames only (preferred)
+    angles_all: List[float] = []    # every visible frame (fallback)
     used_toe = True
+    # only measure from frames where the front foot is actually planted
+    # (ankle near its lowest point in the clip) — an airborne foot's
+    # ankle→toe vector points wherever the swing carries it
+    ground_y = feet.get("ground_y")
+    band = cfg["foot_lift_ratio"] * det["height"]
     for xy, vis in zip(det["mp_xy"], det["mp_vis"]):
         if xy is None or vis[fa_mp] < CONF_THRESHOLD:
             continue
@@ -355,7 +368,14 @@ def _front_foot_metric(det, contact: Optional[int], shot_dir: Optional[float],
             continue
         if np.hypot(*v) < 3.0:
             continue
-        angles.append(_deg(float(v[0]), float(v[1])))
+        angles_all.append(_deg(float(v[0]), float(v[1])))
+        if ground_y is None or float(xy[fa_mp][1]) >= ground_y - band:
+            angles.append(_deg(float(v[0]), float(v[1])))
+
+    planted_frames = len(angles)
+    if len(angles) < 3:
+        angles = angles_all  # foot barely leaves the ground — use everything
+    base["planted_frames"] = planted_frames
 
     if not angles:
         return {**_not_detected("front foot landmarks not visible"), **base,
@@ -465,6 +485,14 @@ def _head_balance_metric(det, contact: Optional[int], feet: Dict[str, Any], cfg,
             f"implausible offset {ref_off:.0f} cm — px→cm scale/reference unreliable"),
             "offset_cm_at_contact": None, "median_offset": None,
             "label": None, "jitter_cm": None, "unit": "cm"}
+    if contact_off is None:
+        # head position must be judged at contact — during the stance the head
+        # normally sits behind the front foot in a side-on view
+        return {**_not_detected("contact frame required to judge head position"),
+                "offset_cm_at_contact": None,
+                "median_offset": round(float(np.median(off_cm_frames)), 1),
+                "label": None, "jitter": round(jitter, 2) if jitter is not None else None,
+                "unit": unit}
     tol = cfg["head_tolerance_cm"] if cm_scale else cfg["head_tolerance_cm"] / max(cm_scale or 1.0, 1e-6)
     balanced = abs(ref_off) <= tol
 
@@ -519,6 +547,15 @@ def _ball_plausible(det, cfg) -> Tuple[bool, str]:
     if med > limit:
         return False, (f"erratic ball track rejected "
                        f"(median jump {med:.0f}px > {limit:.0f}px)")
+    # teleport gate: false positives hop between fixed clusters (wall objects),
+    # producing long smooth runs joined by huge jumps a real ball never makes
+    tele_limit = cfg["ball_teleport_ratio"] * min(det["width"], det["height"])
+    teleports = sum(
+        1 for a, b in zip(idx, idx[1:])
+        if float(np.hypot(*(det["balls"][b] - det["balls"][a]))) > tele_limit)
+    if teleports > cfg["ball_max_teleports"]:
+        return False, (f"cluster-hopping false positives rejected "
+                       f"({teleports} teleports > {cfg['ball_max_teleports']})")
     return True, ""
 
 
@@ -788,6 +825,8 @@ def _build_feedback(report: Dict[str, Any]) -> List[str]:
     wt = report["weight_transfer"]
     if wt.get("status", "").startswith("ok") and wt.get("contact_pct") is not None:
         fb.append(f"Weight transfer {wt['start_pct']:.0f}% → {wt['contact_pct']:.0f}% at contact ({wt['label']})")
+    elif wt.get("status", "").startswith("ok") and wt.get("start_pct") is not None:
+        fb.append(f"Weight transfer start {wt['start_pct']:.0f}% ({wt['label']}) — contact value not measurable")
     else:
         fb.append("Weight transfer not detected")
 
@@ -924,7 +963,10 @@ def _draw_hud(frame, i: int, det: dict, wt: dict, hb: dict, ff: dict,
     xy, vis = det["mp_xy"][i], det["mp_vis"][i]
     if xy is not None:
         fa_mp, knee_mp, toe_mp, heel_mp = feet["fa"], feet["knee"], feet["toe"], feet["heel"]
-        if vis[fa_mp] >= CONF_THRESHOLD:
+        band = cfg["foot_lift_ratio"] * det["height"]
+        planted_now = (feet.get("ground_y") is None
+                       or float(xy[fa_mp][1]) >= feet["ground_y"] - band)
+        if vis[fa_mp] >= CONF_THRESHOLD and planted_now:
             tip_i = toe_mp if vis[toe_mp] >= CONF_THRESHOLD else (
                 heel_mp if vis[heel_mp] >= CONF_THRESHOLD else (
                     knee_mp if vis[knee_mp] >= CONF_THRESHOLD else None))
