@@ -49,20 +49,31 @@ CONFIG: Dict[str, Any] = {
     # -- 1. weight transfer ------------------------------------------------
     "wt_back_max_pct": 40.0,        # <= this  -> "Back foot"
     "wt_front_min_pct": 60.0,       # >= this  -> "Front foot" (else Balanced)
-    "wt_min_spread_px": 12.0,       # min |front_ankle_x - back_ankle_x|
+    "wt_min_spread_px": 12.0,       # min |front_ankle_x - back_ankle_x| (absolute floor)
+    "wt_min_spread_ratio": 0.10,    # ... also required as fraction of frame width
+    "wt_plausible_min": -25.0,      # reject values outside this plausible band
+    "wt_plausible_max": 130.0,      #   (feet nearly aligned in x => denominator ~0)
     # -- 2. front foot direction -------------------------------------------
     "foot_shot_tol_deg": 20.0,      # |foot - shot| < 20° -> "Pointing to shot area"
+    "foot_lift_ratio": 0.04,        # ankle y gap > ratio*height => one foot airborne
     # -- 3. head balance ----------------------------------------------------
     "person_height_cm": 175.0,      # used to convert px -> cm
+    "person_height_pct": 90.0,      # percentile of nose-ankle height = standing height
     "head_tolerance_cm": 6.0,       # head within ±this of front knee/foot -> Balanced
+    "max_head_offset_cm": 45.0,     # beyond this the scale/reference is unreliable
     # -- 4. ball contact ----------------------------------------------------
     "contact_max_dist_ratio": 0.12,  # accept ball-bat match if dist <= ratio*min(w,h)
     "traj_turn_deg": 40.0,          # ball direction change >= this -> contact (fallback)
     "traj_min_speed_px": 4.0,       # ignore slower-than-this ball motion for turns
+    "traj_min_approach": 3,         # ball detections required before a turn contact
+    "traj_body_dist_ratio": 0.35,   # ball must be within this*min(w,h) of bat/body at turn
+    "ball_min_dets": 6,             # min detections before a ball track can be trusted
+    "ball_max_curv_ratio": 0.06,    # median 2nd-diff of track <= this*min(w,h) (smoothness)
     # -- 5. eye focus -------------------------------------------------------
     "eye_on_ball_deg": 15.0,        # gaze vs head-to-ball angle < 15° -> eyes on ball
     "eye_away_deg": 30.0,           # angle > 30° sustained -> head turned away
     "eye_away_min_frames": 3,       # consecutive frames to count as turned away
+    "eye_min_ball_frames": 5,       # pre-contact ball frames required for eye focus
     "min_face_px": 2.0,             # nose-ear offset below this = facing camera (skip)
     # -- 6. shot timing -----------------------------------------------------
     "wrist_rise_min_px": 10.0,      # grip must rise at least this (backlift start)
@@ -223,34 +234,82 @@ def _cm_scale(det) -> Optional[float]:
             heights.append(abs(ank[1] - xy[MP_NOSE][1]))
     if not heights:
         return None
-    body_px = float(np.median(heights))
+    # 90th percentile ≈ standing height (median is dragged down by crouched /
+    # bent frames, which inflated every px→cm conversion).
+    body_px = float(np.percentile(heights, CONFIG.get("person_height_pct", 90.0)))
     if body_px < 20.0:
         return None
     return CONFIG["person_height_cm"] / body_px
 
 
-def _weight_transfer_metric(det, contact: Optional[int], batter_hand: str, cfg) -> Dict[str, Any]:
-    fa, ba, _, _, _, _ = _front_back_indices(batter_hand)
-    hip_c, ank_f, ank_b = COCO_L_HIP, COCO_L_ANK, COCO_R_ANK  # COCO for hips/ankles
-    # map front/back to COCO ankle indices (COCO: 10=R ankle, 13=L ankle)
-    if batter_hand == "left":
-        ank_f, ank_b = COCO_R_ANK, COCO_L_ANK
+def _choose_front_foot(det, batter_hand: str, cfg) -> Dict[str, Any]:
+    """Select the front foot for direction / head / weight metrics.
+
+    Default is the hand-based front foot (RHB -> left). If one ankle is
+    clearly held above the other for most of the shot (airborne / lifted),
+    the lower (planted) foot is used instead so we never measure a foot
+    that isn't on the ground.
+    """
+    fa, ba, knee, toe, heel, _ = _front_back_indices(batter_hand)
+    h = det["height"]
+    min_frames = max(3, int(0.05 * det["n"]))
+
+    def mean_ankle_y(mp: int) -> Optional[float]:
+        ys = [float(xy[mp][1]) for xy, vis in zip(det["mp_xy"], det["mp_vis"])
+              if xy is not None and vis[mp] >= CONF_THRESHOLD]
+        return float(np.mean(ys)) if len(ys) >= min_frames else None
+
+    y_l, y_r = mean_ankle_y(MP_L_ANK), mean_ankle_y(MP_R_ANK)
+    source = "hand"
+    if (y_l is not None and y_r is not None
+            and abs(y_l - y_r) > cfg["foot_lift_ratio"] * h):
+        planted_left = y_l > y_r  # larger y = lower in the image = on the ground
+        if planted_left != (fa == MP_L_ANK):
+            source = "planted"
+            if batter_hand == "right":
+                fa, ba, knee, toe, heel = MP_R_ANK, MP_L_ANK, MP_R_KNE, MP_R_TOE, MP_R_HEEL
+            else:
+                fa, ba, knee, toe, heel = MP_L_ANK, MP_R_ANK, MP_L_KNE, MP_L_TOE, MP_L_HEEL
+
+    return {
+        "fa": fa, "ba": ba, "knee": knee, "toe": toe, "heel": heel,
+        "coco_fa": COCO_R_ANK if fa == MP_R_ANK else COCO_L_ANK,
+        "coco_ba": COCO_R_ANK if ba == MP_R_ANK else COCO_L_ANK,
+        "used_foot": "right" if fa == MP_R_ANK else "left",
+        "source": source,
+    }
+
+
+def _weight_transfer_metric(det, contact: Optional[int], feet: Dict[str, Any],
+                            cfg) -> Dict[str, Any]:
+    hip_c = COCO_L_HIP
+    ank_f, ank_b = feet["coco_fa"], feet["coco_ba"]  # COCO: 10=R ankle, 13=L ankle
+    min_spread = max(cfg["wt_min_spread_px"], cfg["wt_min_spread_ratio"] * det["width"])
+    stats = {"spread": 0, "range": 0}
 
     def pct_at(i: int) -> Optional[float]:
         c = det["coco"][i]
         if c is None:
             return None
-        spread = abs(c[ank_f, 0] - c[ank_b, 0])
-        if spread < cfg["wt_min_spread_px"]:
-            return None
         if min(c[hip_c, 2], c[ank_f, 2], c[ank_b, 2]) < CONF_THRESHOLD:
             return None
+        spread = abs(c[ank_f, 0] - c[ank_b, 0])
+        if spread < min_spread:
+            stats["spread"] += 1
+            return None
         hip_x = 0.5 * (c[COCO_L_HIP, 0] + c[COCO_R_HIP, 0])
-        return (hip_x - c[ank_b, 0]) / (c[ank_f, 0] - c[ank_b, 0]) * 100.0
+        pct = (hip_x - c[ank_b, 0]) / (c[ank_f, 0] - c[ank_b, 0]) * 100.0
+        if not (cfg["wt_plausible_min"] <= pct <= cfg["wt_plausible_max"]):
+            stats["range"] += 1
+            return None
+        return pct
 
     start_i = next((i for i in range(det["n"]) if pct_at(i) is not None), None)
     if start_i is None:
-        return {**_not_detected("ankles/hips not visible (or feet aligned in x)"),
+        reason = ("implausible geometry (feet nearly aligned in x)"
+                  if (stats["spread"] or stats["range"])
+                  else "ankles/hips not visible")
+        return {**_not_detected(reason),
                 "start_pct": None, "contact_pct": None, "shift_pct": None, "label": None}
 
     start_pct = pct_at(start_i)
@@ -275,8 +334,9 @@ def _weight_transfer_metric(det, contact: Optional[int], batter_hand: str, cfg) 
 
 
 def _front_foot_metric(det, contact: Optional[int], shot_dir: Optional[float],
-                       batter_hand: str, cfg) -> Dict[str, Any]:
-    fa_mp, _, knee_mp, toe_mp, heel_mp, _ = _front_back_indices(batter_hand)
+                       feet: Dict[str, Any], cfg) -> Dict[str, Any]:
+    fa_mp, knee_mp, toe_mp, heel_mp = feet["fa"], feet["knee"], feet["toe"], feet["heel"]
+    base = {"used_foot": feet["used_foot"], "foot_source": feet["source"]}
 
     angles: List[float] = []
     used_toe = True
@@ -298,7 +358,7 @@ def _front_foot_metric(det, contact: Optional[int], shot_dir: Optional[float],
         angles.append(_deg(float(v[0]), float(v[1])))
 
     if not angles:
-        return {**_not_detected("front foot landmarks not visible"),
+        return {**_not_detected("front foot landmarks not visible"), **base,
                 "angle_deg": None, "vs_bowler_deg": None,
                 "shot_direction_deg": shot_dir, "difference_deg": None, "flag": None}
 
@@ -311,6 +371,7 @@ def _front_foot_metric(det, contact: Optional[int], shot_dir: Optional[float],
     if shot_dir is None:
         return {
             "status": "ok (shot direction not detected)",
+            **base,
             "angle_deg": round(foot_angle, 1),
             "used_toe": used_toe,
             "vs_bowler_deg": round(vs_bowler, 1) if vs_bowler is not None else None,
@@ -322,6 +383,7 @@ def _front_foot_metric(det, contact: Optional[int], shot_dir: Optional[float],
     diff = abs(_ang_diff(foot_angle, shot_dir))
     return {
         "status": "ok",
+        **base,
         "angle_deg": round(foot_angle, 1),
         "used_toe": used_toe,
         "vs_bowler_deg": round(vs_bowler, 1) if vs_bowler is not None else None,
@@ -357,9 +419,9 @@ def _shot_direction(det, contact: Optional[int], param: Optional[float]) -> Tupl
     return None, "not detected"
 
 
-def _head_balance_metric(det, contact: Optional[int], batter_hand: str, cfg,
+def _head_balance_metric(det, contact: Optional[int], feet: Dict[str, Any], cfg,
                          cm_scale: Optional[float]) -> Dict[str, Any]:
-    fa_mp, _, knee_mp, _, _, _ = _front_back_indices(batter_hand)
+    fa_mp, knee_mp = feet["fa"], feet["knee"]
     off_cm_frames: List[float] = []
     jitter_px: List[float] = []
     prev_head: Optional[float] = None
@@ -398,6 +460,11 @@ def _head_balance_metric(det, contact: Optional[int], batter_hand: str, cfg,
             contact_off = off_px * cm_scale if cm_scale else off_px
 
     ref_off = contact_off if contact_off is not None else float(np.median(off_cm_frames))
+    if cm_scale and abs(ref_off) > cfg["max_head_offset_cm"]:
+        return {**_not_detected(
+            f"implausible offset {ref_off:.0f} cm — px→cm scale/reference unreliable"),
+            "offset_cm_at_contact": None, "median_offset": None,
+            "label": None, "jitter_cm": None, "unit": "cm"}
     tol = cfg["head_tolerance_cm"] if cm_scale else cfg["head_tolerance_cm"] / max(cm_scale or 1.0, 1e-6)
     balanced = abs(ref_off) <= tol
 
@@ -411,8 +478,53 @@ def _head_balance_metric(det, contact: Optional[int], batter_hand: str, cfg,
     }
 
 
+def _ball_speed_at(det, i: int) -> Optional[float]:
+    """Ball speed (px/frame) around frame i; None when no neighbours exist."""
+    b = det["balls"][i]
+    prev = next((j for j in range(i - 1, max(i - 4, -1), -1)
+                 if det["balls"][j] is not None), None)
+    nxt = next((j for j in range(i + 1, min(i + 4, det["n"]))
+                if det["balls"][j] is not None), None)
+    if prev is None and nxt is None:
+        return None
+    speeds = []
+    if prev is not None:
+        speeds.append(float(np.hypot(*(b - det["balls"][prev]))) / (i - prev))
+    if nxt is not None:
+        speeds.append(float(np.hypot(*(det["balls"][nxt] - b))) / (nxt - i))
+    return float(np.mean(speeds))
+
+
+def _ball_plausible(det, cfg) -> Tuple[bool, str]:
+    """Reject erratic YOLO tracks (false positives in shadow practice etc.).
+
+    A real ball travels smoothly, so the median second difference of its
+    track stays small even at high speed; random false positives jump
+    hundreds of px between frames with no consistent direction.
+    """
+    idx = [i for i, b in enumerate(det["balls"]) if b is not None]
+    if len(idx) < cfg["ball_min_dets"]:
+        return False, f"ball detected in only {len(idx)} frames (<{cfg['ball_min_dets']})"
+    limit = cfg["ball_max_curv_ratio"] * min(det["width"], det["height"])
+    curvs: List[float] = []
+    for k in range(2, len(idx)):
+        ia, ib, ic = idx[k - 2], idx[k - 1], idx[k]
+        if ib - ia > 2 or ic - ib > 2:
+            continue
+        pa, pb, pc = det["balls"][ia], det["balls"][ib], det["balls"][ic]
+        curvs.append(float(np.hypot(*(pc - 2 * pb + pa))))
+    if not curvs:
+        return False, "ball detections too sparse to validate"
+    med = float(np.median(curvs))
+    if med > limit:
+        return False, (f"erratic ball track rejected "
+                       f"(median jump {med:.0f}px > {limit:.0f}px)")
+    return True, ""
+
+
 def _ball_contact_metric(det, cfg) -> Tuple[Optional[int], Dict[str, Any]]:
-    # primary: smallest ball <-> bat-tip distance
+    # primary: smallest ball <-> bat-tip distance (ball must be moving — a
+    # static false positive locked onto the scene is rejected)
     best_i, best_d = None, float("inf")
     limit = cfg["contact_max_dist_ratio"] * min(det["width"], det["height"])
     for i in range(det["n"]):
@@ -422,19 +534,27 @@ def _ball_contact_metric(det, cfg) -> Tuple[Optional[int], Dict[str, Any]]:
         d = float(np.hypot(*(b - t)))
         if d < best_d:
             best_d, best_i = d, i
+    note = None
     if best_i is not None and best_d <= limit:
-        return best_i, {
-            "status": "ok", "frame": best_i,
-            "time_ms": round(best_i / det["fps"] * 1000.0, 1),
-            "method": "ball_bat_min_distance",
-            "distance_px": round(best_d, 1),
-        }
+        sp = _ball_speed_at(det, best_i)
+        if sp is None or sp >= cfg["traj_min_speed_px"]:
+            return best_i, {
+                "status": "ok", "frame": best_i,
+                "time_ms": round(best_i / det["fps"] * 1000.0, 1),
+                "method": "ball_bat_min_distance",
+                "distance_px": round(best_d, 1),
+            }
+        note = "ball near bat but not moving (likely false positive)"
 
-    # fallback: abrupt ball trajectory direction change
+    # fallback: abrupt ball trajectory direction change — only accepted with
+    # enough approach detections and the ball actually at the bat/body
     pts = [(i, det["balls"][i]) for i in range(det["n"]) if det["balls"][i] is not None]
     turn_i, turn_best = None, cfg["traj_turn_deg"]
+    body_limit = cfg["traj_body_dist_ratio"] * min(det["width"], det["height"])
     for k in range(2, len(pts)):
         (ia, pa), (ib, pb), (ic, pc) = pts[k - 2], pts[k - 1], pts[k]
+        if k - 1 < cfg["traj_min_approach"]:
+            continue  # not enough detections before the turn
         v1 = (pb - pa) / max(ib - ia, 1)
         v2 = (pc - pb) / max(ic - ib, 1)
         s1, s2 = float(np.hypot(*v1)), float(np.hypot(*v2))
@@ -442,8 +562,18 @@ def _ball_contact_metric(det, cfg) -> Tuple[Optional[int], Dict[str, Any]]:
             continue
         cosang = float(np.clip(np.dot(v1, v2) / (s1 * s2), -1.0, 1.0))
         turn = math.degrees(math.acos(cosang))
-        if turn >= turn_best:
-            turn_best, turn_i = turn, ib
+        if turn < turn_best:
+            continue
+        # proximity gate: at contact the ball must be at the bat or body
+        ref = det["tips"][ib]
+        if ref is None:
+            c = det["coco"][ib]
+            if c is not None and min(c[COCO_L_HIP, 2], c[COCO_R_HIP, 2]) >= CONF_THRESHOLD:
+                ref = np.array([0.5 * (c[COCO_L_HIP, 0] + c[COCO_R_HIP, 0]),
+                                0.5 * (c[COCO_L_HIP, 1] + c[COCO_R_HIP, 1])])
+        if ref is None or float(np.hypot(*(pb - ref))) > body_limit:
+            continue
+        turn_best, turn_i = turn, ib
     if turn_i is not None:
         return turn_i, {
             "status": "ok", "frame": turn_i,
@@ -452,13 +582,22 @@ def _ball_contact_metric(det, cfg) -> Tuple[Optional[int], Dict[str, Any]]:
             "turn_deg": round(turn_best, 1),
         }
 
-    reason = "ball never detected" if all(b is None for b in det["balls"]) else "no ball-bat proximity or trajectory turn found"
+    reason = (det.get("ball_note")
+              or ("ball never detected" if all(b is None for b in det["balls"])
+                  else "no ball-bat proximity or trajectory turn found"))
+    if note:
+        reason = note
     return None, {**_not_detected(reason), "frame": None, "time_ms": None, "method": None}
 
 
 def _eye_focus_metric(det, contact: Optional[int], cfg) -> Dict[str, Any]:
     if contact is None or contact <= 0:
         return {**_not_detected("contact frame required for pre-contact window"),
+                "pct_eyes_on_ball": None, "frames_checked": 0, "turned_away_at_frame": None}
+    ball_frames = sum(1 for i in range(contact) if det["balls"][i] is not None)
+    if ball_frames < cfg["eye_min_ball_frames"]:
+        return {**_not_detected(f"only {ball_frames} pre-contact ball detections "
+                                f"(<{cfg['eye_min_ball_frames']})"),
                 "pct_eyes_on_ball": None, "frames_checked": 0, "turned_away_at_frame": None}
 
     on_ball = checked = 0
@@ -697,6 +836,13 @@ def _build_feedback(report: Dict[str, Any]) -> List[str]:
         if tm.get("swing_speed_mps") is not None:
             line += f", swing {tm['swing_speed_mps']:.1f} m/s"
         fb.append(line)
+    elif tm.get("status", "").startswith("ok"):
+        ph = {k: v for k, v in (tm.get("phases_ms") or {}).items() if v is not None}
+        if ph:
+            parts = ", ".join(f"{k} {v:.0f} ms" for k, v in ph.items())
+            fb.append(f"Timing partial ({parts}) — contact not detected")
+        else:
+            fb.append("Shot timing not detected")
     else:
         fb.append("Shot timing not detected")
 
@@ -738,7 +884,7 @@ def _put_text(frame, text, org, color, scale=0.55, thickness=1):
 
 def _draw_hud(frame, i: int, det: dict, wt: dict, hb: dict, ff: dict,
               phases: Dict[str, Optional[int]], contact: Optional[int],
-              batter_hand: str, cfg) -> None:
+              feet: Dict[str, Any], cfg) -> None:
     import cv2
 
     h, w = frame.shape[:2]
@@ -777,7 +923,7 @@ def _draw_hud(frame, i: int, det: dict, wt: dict, hb: dict, ff: dict,
     # --- front foot arrow ---
     xy, vis = det["mp_xy"][i], det["mp_vis"][i]
     if xy is not None:
-        fa_mp, _, knee_mp, toe_mp, heel_mp, _ = _front_back_indices(batter_hand)
+        fa_mp, knee_mp, toe_mp, heel_mp = feet["fa"], feet["knee"], feet["toe"], feet["heel"]
         if vis[fa_mp] >= CONF_THRESHOLD:
             tip_i = toe_mp if vis[toe_mp] >= CONF_THRESHOLD else (
                 heel_mp if vis[heel_mp] >= CONF_THRESHOLD else (
@@ -796,7 +942,7 @@ def _draw_hud(frame, i: int, det: dict, wt: dict, hb: dict, ff: dict,
 
     # --- head balance indicator: ref line + head dot ---
     if xy is not None and vis[MP_NOSE] >= CONF_THRESHOLD:
-        fa_mp2, _, knee_mp2, _, _, _ = _front_back_indices(batter_hand)
+        fa_mp2, knee_mp2 = feet["fa"], feet["knee"]
         if vis[knee_mp2] >= CONF_THRESHOLD and vis[fa_mp2] >= CONF_THRESHOLD:
             ref_x = int(0.5 * (xy[knee_mp2][0] + xy[fa_mp2][0]))
             head_x = int(xy[MP_NOSE][0])
@@ -819,7 +965,7 @@ def _draw_hud(frame, i: int, det: dict, wt: dict, hb: dict, ff: dict,
 
 
 def _write_annotated(input_path: str, output_path: str, det: dict, report: dict,
-                     phases: Dict[str, Optional[int]], batter_hand: str) -> None:
+                     phases: Dict[str, Optional[int]], feet: Dict[str, Any]) -> None:
     import cv2
 
     cfg = CONFIG
@@ -844,7 +990,7 @@ def _write_annotated(input_path: str, output_path: str, det: dict, report: dict,
                 break
             if i < det["n"]:
                 _draw_hud(frame, i, det, report["weight_transfer"], report["head_balance"],
-                          report["front_foot"], phases, contact, batter_hand, cfg)
+                          report["front_foot"], phases, contact, feet, cfg)
             writer.write(frame)
             i += 1
     finally:
@@ -886,10 +1032,20 @@ def analyze_cricket_shot(
     if det["n"] == 0:
         raise ValueError(f"No frames read from video: {input_path}")
 
+    # 1a) ball-track plausibility — erratic YOLO false positives (shadow
+    #     practice, no visible ball) are discarded before any ball metric
+    plausible, why = _ball_plausible(det, cfg)
+    if not plausible:
+        det["balls"] = [None] * det["n"]
+        det["ball_note"] = why
+
+    # 1b) front foot: planted (lower) foot if one is clearly airborne
+    feet = _choose_front_foot(det, batter_hand, cfg)
+
     # 2) contact first (other metrics depend on it)
     contact, ball_contact = _ball_contact_metric(det, cfg)
 
-    # 3) shot direction (trajectory -> user param)
+    # 3) shot direction (trajectory -> user param -> not detected)
     shot_dir, shot_src = _shot_direction(det, contact, shot_direction)
 
     # 4) px -> cm scale
@@ -902,9 +1058,9 @@ def analyze_cricket_shot(
         except Exception as exc:  # noqa: BLE001 — metric must never crash the run
             return {**_not_detected(f"{type(exc).__name__}: {exc}")}
 
-    weight_transfer = safe(_weight_transfer_metric, det, contact, batter_hand, cfg)
-    front_foot = safe(_front_foot_metric, det, contact, shot_dir, batter_hand, cfg)
-    head_balance = safe(_head_balance_metric, det, contact, batter_hand, cfg, cm_scale)
+    weight_transfer = safe(_weight_transfer_metric, det, contact, feet, cfg)
+    front_foot = safe(_front_foot_metric, det, contact, shot_dir, feet, cfg)
+    head_balance = safe(_head_balance_metric, det, contact, feet, cfg, cm_scale)
     eye_focus = safe(_eye_focus_metric, det, contact, cfg)
 
     grip = _grip_series(det)
@@ -925,7 +1081,7 @@ def analyze_cricket_shot(
     report["feedback"] = _build_feedback(report)
 
     # 6) annotated video (skeleton + HUD)
-    _write_annotated(input_path, output_path, det, report, phases, batter_hand)
+    _write_annotated(input_path, output_path, det, report, phases, feet)
 
     # 7) JSON report next to the video
     json_path = Path(output_path).with_suffix(".json")
