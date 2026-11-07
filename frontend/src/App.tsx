@@ -390,6 +390,24 @@ export const App: React.FC = () => {
                           seekToFrame={replayFrame}
                           onFrameChange={setReplayFrame}
                         />
+
+                        {/* OpenPose-style annotated video (pose overlay) */}
+                        {activeShot.pose_video_url && (
+                          <div className="glass-panel rounded-2xl overflow-hidden border border-white/8 fade-in">
+                            <div className="flex items-center gap-2 px-4 py-3 border-b border-white/6">
+                              <span className="w-1.5 h-1.5 rounded-full bg-fuchsia-400 animate-pulse" />
+                              <h4 className="text-xs font-bold text-white">Pose Overlay</h4>
+                              <span className="text-[10px] text-slate-500 font-numeric">OpenPose-style · COCO-18</span>
+                            </div>
+                            <video
+                              src={activeShot.pose_video_url}
+                              controls
+                              playsInline
+                              muted
+                              className="w-full max-h-[360px] bg-black object-contain"
+                            />
+                          </div>
+                        )}
                       </div>
 
                       {/* MIDDLE (3 cols): Overall Score card */}

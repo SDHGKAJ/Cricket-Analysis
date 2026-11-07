@@ -40,6 +40,8 @@ backend/uploads/*
 !backend/uploads/.gitkeep
 backend/replays/*
 !backend/replays/.gitkeep
+backend/outputs/*
+!backend/outputs/.gitkeep
 
 # Environment variables
 .env

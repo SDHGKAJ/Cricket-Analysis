@@ -55,6 +55,7 @@ export interface ShotAnalysis {
   total_frames?: number;
   shot_id?: string;
   replay_url?: string;
+  pose_video_url?: string;
   confidence?: number;
   delta_last_session?: number;
   frames?: FrameLandmarks[];

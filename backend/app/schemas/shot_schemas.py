@@ -26,6 +26,7 @@ class ShotAnalysisResponse(BaseModel):
     total_frames: Optional[int] = 0
     shot_id: Optional[str] = None
     replay_url: Optional[str] = None
+    pose_video_url: Optional[str] = None
     frames: List[FrameLandmarks] = []
 
 class LandmarkPoint(BaseModel):

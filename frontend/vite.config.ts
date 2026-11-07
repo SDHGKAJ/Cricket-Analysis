@@ -18,6 +18,10 @@ export default defineConfig({
       '/uploads': {
         target: 'http://localhost:8000',
         changeOrigin: true,
+      },
+      '/outputs': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
       }
     }
   }

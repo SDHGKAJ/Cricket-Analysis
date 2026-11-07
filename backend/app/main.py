@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from .config import BASE_DIR, UPLOAD_DIR, REPLAY_DIR, SHOTS_CONFIG, FLAWS_CONFIG
+from .config import BASE_DIR, UPLOAD_DIR, REPLAY_DIR, OUTPUT_DIR, SHOTS_CONFIG, FLAWS_CONFIG
 from .database import engine, Base, get_db
 from .models.shot_models import SessionModel, ShotRecordModel
 from .schemas.shot_schemas import (
@@ -33,6 +33,7 @@ from .engine.flaw_detector import FlawDetector
 from .engine.shot_classifier import get_shot_classifier
 from .engine.yolo_tracker import CricketObjectTracker
 from .engine.slowmo_generator import SlowMoReplayGenerator
+from .engine.pose_overlay import analyze_video as analyze_pose_overlay
 
 # Initialize database tables
 Base.metadata.create_all(bind=engine)
@@ -57,9 +58,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Static file serving for uploads & replays
+# Static file serving for uploads, replays & pose-overlay outputs
 app.mount("/replays", StaticFiles(directory=str(REPLAY_DIR)), name="replays")
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
+app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 
 segmenter = ShotSegmentationEngine(fps=30.0)
 object_tracker = CricketObjectTracker()
@@ -334,6 +336,14 @@ async def analyze_video_upload(
     )
     if replay_path:
         result.replay_url = f"/replays/{Path(replay_path).name}"
+
+    # OpenPose-style skeleton overlay video (original resolution/FPS, H.264)
+    try:
+        pose_out = OUTPUT_DIR / f"pose_{file_id}.mp4"
+        analyze_pose_overlay(str(saved_path), str(pose_out))
+        result.pose_video_url = f"/outputs/{pose_out.name}"
+    except Exception:
+        pass  # pose overlay is best-effort; analysis result is still returned
 
     return result
 
