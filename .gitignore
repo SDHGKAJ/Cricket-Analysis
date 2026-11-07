@@ -66,6 +66,11 @@ Thumbs.db
 *.onnx
 *.pt
 *.pth
+*.task
+
+# Playwright test artifacts & debug screenshots
+.playwright-mcp/
+/*.png
 
 # Dataset & extracted features
 Cricket-Ball-Detection-1/

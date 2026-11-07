@@ -194,6 +194,7 @@ export const App: React.FC = () => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [highlightedDrillFlaw, setHighlightedDrillFlaw] = useState<string | null>(null);
   const [replayFrame, setReplayFrame] = useState(0);
+  const [poseMissing, setPoseMissing] = useState(false);
 
   useEffect(() => {
     createBattingSession('Batter 01', cameraAngle, batterHand)
@@ -254,6 +255,7 @@ export const App: React.FC = () => {
     setActiveFrames(result.frames ?? []);
     setShotsHistory((prev) => [...prev, result]);
     setAppState('ready');
+    setPoseMissing(!result.pose_video_url);
   };
 
   const handleSelectShot = (shot: ShotAnalysis) => {
@@ -281,10 +283,17 @@ export const App: React.FC = () => {
     setReplayFrame(0);
     setHighlightedDrillFlaw(null);
     setSelectedJoint(null);
+    setPoseMissing(false);
   };
 
   const hasShots = shotsHistory.length > 0;
   const showScore = activeShot != null;
+
+  // ⚠️ ALL DASHBOARD CONTENT COMMENTED OUT (UI shell only).
+  // Flip to true to restore: empty/upload state, analysis hero,
+  // flaws + drills row, metric breakdown + history row, drill library,
+  // and session dashboard.
+  const SHOW_DASHBOARD_CONTENT = false;
 
   return (
     <div className="min-h-screen text-slate-100 bg-[#0B1220] selection:bg-emerald-500/30 selection:text-white">
@@ -320,12 +329,62 @@ export const App: React.FC = () => {
 
           <main className="max-w-screen-xl mx-auto px-4 lg:px-8 pt-6 pb-20 space-y-8">
 
+            {/* ═════════════════════════════════════════════════════════════
+                POSE ANALYSIS ONLY — upload video → OpenPose-style annotated video
+                (shown while SHOW_DASHBOARD_CONTENT is false)
+                ══════════════════════════════════════════════════════════ */}
+            {!SHOW_DASHBOARD_CONTENT && (
+              <div className="max-w-3xl mx-auto space-y-6">
+                {/* Result: annotated skeleton video */}
+                {activeShot?.pose_video_url ? (
+                  <div className="glass-panel rounded-2xl overflow-hidden border border-white/8 fade-in">
+                    <div className="flex items-center justify-between px-4 py-3 border-b border-white/6">
+                      <div className="flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-fuchsia-400 animate-pulse" />
+                        <h4 className="text-xs font-bold text-white">Pose Analysis</h4>
+                        <span className="text-[10px] text-slate-500 font-numeric">OpenPose-style · COCO-18</span>
+                      </div>
+                      <button
+                        onClick={handleReset}
+                        className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-bold text-slate-300 hover:text-white transition-all"
+                      >
+                        Analyze another
+                      </button>
+                    </div>
+                    <video
+                      src={activeShot.pose_video_url}
+                      controls
+                      autoPlay
+                      playsInline
+                      muted
+                      className="w-full max-h-[70vh] bg-black object-contain"
+                    />
+                  </div>
+                ) : (
+                  /* Input: reuse the existing upload handler */
+                  <VideoUploader
+                    cameraAngle={cameraAngle}
+                    batterHand={batterHand}
+                    sessionId={sessionId}
+                    onAnalysisComplete={(result) => {
+                      handleVideoComplete(result);
+                    }}
+                  />
+                )}
 
+                {/* Backend unavailable → explain why no annotated video */}
+                {poseMissing && (
+                  <p className="text-[11px] text-amber-400/80 text-center">
+                    No annotated video returned — check that the backend on port 8000 is running.
+                  </p>
+                )}
+              </div>
+            )}
 
             {/* ═════════════════════════════════════════════════════════════
                 VIDEO STUDIO — full analysis dashboard
                 ══════════════════════════════════════════════════════════ */}
-            {navActive === 'video' && (
+            {SHOW_DASHBOARD_CONTENT && navActive === 'video' && (
               <>
                 {/* EMPTY / ANALYZING / ERROR / LIVE STATES */}
                 {appState === 'empty' && !hasShots ? (
@@ -475,7 +534,7 @@ export const App: React.FC = () => {
             {/* ══════════════════════════════════════════════════════════════
                 COACH DRILLS — drill library & practice plan
                 ══════════════════════════════════════════════════════════ */}
-            {navActive === 'drills' && (
+            {SHOW_DASHBOARD_CONTENT && navActive === 'drills' && (
               <section className="space-y-6" aria-label="Coach Drills">
                 <div className="glass-panel rounded-2xl p-6 border border-slate-700/60 shadow-xl">
                   <div className="flex items-center justify-between mb-6">
@@ -525,7 +584,7 @@ export const App: React.FC = () => {
             {/* ═════════════════════════════════════════════════════════════
                 DASHBOARD — session analytics & history
                 ══════════════════════════════════════════════════════════ */}
-            {navActive === 'dashboard' && (
+            {SHOW_DASHBOARD_CONTENT && navActive === 'dashboard' && (
               <section className="space-y-6" aria-label="Dashboard">
                 <div className="glass-panel rounded-2xl p-6 border border-slate-700/60 shadow-xl">
                   <SessionDashboard

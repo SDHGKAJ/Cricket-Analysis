@@ -79,6 +79,118 @@ KEYPOINT_COLORS: List[Tuple[int, int, int]] = [
     (200, 0, 255), (200, 0, 255),                # ears (pink)
 ]
 
+# ── Pose detector (MediaPipe Tasks API, with legacy mp.solutions fallback) ───
+# mediapipe >= 1.0 removed mp.solutions.*; the Tasks API (PoseLandmarker) is
+# the supported path. Model auto-downloads on first use.
+MODEL_PATH = Path(__file__).resolve().parents[2] / "models" / "pose_landmarker.task"
+MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
+    "pose_landmarker_full/float16/1/pose_landmarker_full.task"
+)
+
+
+def _ensure_model() -> Path:
+    """Return the local pose_landmarker.task path, downloading it if missing."""
+    if MODEL_PATH.exists() and MODEL_PATH.stat().st_size > 0:
+        return MODEL_PATH
+    MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        import urllib.request
+        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+    except Exception as exc:  # noqa: BLE001 - surface a clear message
+        if MODEL_PATH.exists():
+            MODEL_PATH.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"Could not download the MediaPipe pose model. Download it manually "
+            f"from {MODEL_URL} and save it as {MODEL_PATH}"
+        ) from exc
+    return MODEL_PATH
+
+
+class _TasksPoseDetector:
+    """MediaPipe Tasks PoseLandmarker (VIDEO mode) -> 33 landmarks per frame."""
+
+    def __init__(self) -> None:
+        import cv2  # noqa: F401  (ensures OpenCV is importable before use)
+        import mediapipe as mp
+        from mediapipe.tasks import python as mp_python
+        from mediapipe.tasks.python import vision
+
+        options = vision.PoseLandmarkerOptions(
+            base_options=mp_python.BaseOptions(model_asset_path=str(_ensure_model())),
+            running_mode=vision.RunningMode.VIDEO,
+            num_poses=1,
+            min_pose_detection_confidence=0.5,
+            min_pose_presence_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+        self._mp = mp
+        self._landmarker = vision.PoseLandmarker.create_from_options(options)
+        self._last_ts = -1
+
+    def detect(self, frame_bgr: np.ndarray, timestamp_ms: float):
+        """Return the 33 NormalizedLandmarks for the person, or None."""
+        import cv2
+
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        image = self._mp.Image(
+            image_format=self._mp.ImageFormat.SRGB,
+            data=np.ascontiguousarray(rgb),
+        )
+        # Tasks API requires strictly increasing timestamps
+        ts = int(round(timestamp_ms))
+        if ts <= self._last_ts:
+            ts = self._last_ts + 1
+        self._last_ts = ts
+        result = self._landmarker.detect_for_video(image, ts)
+        if result.pose_landmarks:
+            return result.pose_landmarks[0]
+        return None
+
+    def close(self) -> None:
+        self._landmarker.close()
+
+
+class _LegacyPoseDetector:
+    """Fallback for mediapipe builds that still ship mp.solutions.pose."""
+
+    def __init__(self) -> None:
+        import mediapipe as mp
+        self._pose = mp.solutions.pose.Pose(
+            static_image_mode=False,
+            model_complexity=1,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+
+    def detect(self, frame_bgr: np.ndarray, timestamp_ms: float):
+        import cv2
+
+        res = self._pose.process(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
+        if res.pose_landmarks:
+            return res.pose_landmarks.landmark
+        return None
+
+    def close(self) -> None:
+        self._pose.close()
+
+
+def create_pose_detector():
+    """Build the best available pose detector; None if mediapipe is unusable.
+
+    Returns an object with .detect(frame_bgr, timestamp_ms) -> landmarks | None
+    and .close().
+    """
+    try:
+        return _TasksPoseDetector()
+    except Exception:
+        pass
+    try:
+        return _LegacyPoseDetector()
+    except Exception:
+        return None
+
+
 # MediaPipe Pose (33) -> COCO-18 source index (None = derived)
 _MP_TO_COCO_SRC = [
     0,    # nose
@@ -260,21 +372,12 @@ def analyze_video(input_path: str, output_path: str) -> str:
         writer.release()
         raise RuntimeError(f"Could not create video writer for: {output_path}")
 
-    # MediaPipe pose estimator (same library already used by the project)
-    pose = None
-    try:
-        import mediapipe as mp
-        pose = mp.solutions.pose.Pose(
-            static_image_mode=False,
-            model_complexity=1,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
-        )
-    except Exception:
-        pose = None
+    # Pose estimator: MediaPipe Tasks API (legacy mp.solutions fallback)
+    pose = create_pose_detector()
 
     smoothed: Optional[np.ndarray] = None
     missed_frames = 0
+    frame_idx = 0
 
     try:
         while True:
@@ -284,10 +387,9 @@ def analyze_video(input_path: str, output_path: str) -> str:
 
             current: Optional[np.ndarray] = None
             if pose is not None:
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                res = pose.process(rgb)
-                if res.pose_landmarks:
-                    current = _mp_landmarks_to_coco(res.pose_landmarks.landmark, width, height)
+                landmarks = pose.detect(frame, (frame_idx / fps) * 1000.0)
+                if landmarks:
+                    current = _mp_landmarks_to_coco(landmarks, width, height)
 
             if current is not None:
                 smoothed = _smooth(smoothed, current)
@@ -301,6 +403,7 @@ def analyze_video(input_path: str, output_path: str) -> str:
                     smoothed = None  # person gone long enough; reset tracker
 
             writer.write(frame)
+            frame_idx += 1
     finally:
         cap.release()
         if pose is not None:
