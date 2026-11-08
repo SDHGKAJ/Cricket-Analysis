@@ -71,6 +71,15 @@ CONFIG: Dict[str, Any] = {
     "ball_max_curv_ratio": 0.06,    # median 2nd-diff of track <= this*min(w,h) (smoothness)
     "ball_teleport_ratio": 0.25,    # consecutive jump > ratio*min(w,h) counts as a teleport
     "ball_max_teleports": 5,        # more teleports than this = cluster-hopping false positive
+    # -- ball tracking: visibility & verification ---------------------------
+    "ball_conf_min": 0.25,          # BALL_CONF_MIN: ignore detections below this confidence
+    "ball_max_jump_ratio": 0.25,    # BALL_MAX_JUMP_PX = ratio * frame width (jump filter)
+    "ball_min_frames": 5,           # MIN_BALL_FRAMES: below this -> status "not detected"
+    "ball_trail_len": 15,           # fading trail length on the output video
+    "ball_trail_gap": 30,           # restart the trail after this many frames without ball
+    "ball_body_margin": 0.04,       # expand batter body box (fraction of its size, min 5 px)
+    "ball_near_bat_ratio": 0.12,    # inside body box kept if within this*min(w,h) of bat tip
+    "ball_debug": False,            # True -> also save ball_debug_<id>.mp4 (raw=red, kept=green)
     # -- 5. eye focus -------------------------------------------------------
     "eye_on_ball_deg": 15.0,        # gaze vs head-to-ball angle < 15° -> eyes on ball
     "eye_away_deg": 30.0,           # angle > 30° sustained -> head turned away
@@ -150,7 +159,8 @@ def _detect_pass(input_path: str) -> Dict[str, Any]:
     mp_xy: List[Optional[np.ndarray]] = []      # (33, 2) px
     mp_vis: List[Optional[np.ndarray]] = []     # (33,)
     coco: List[Optional[np.ndarray]] = []       # (18, 3) smoothed px+conf
-    balls: List[Optional[np.ndarray]] = []      # (2,) px
+    ball_raw: List[Optional[np.ndarray]] = []   # (2,) px — raw YOLO, pre-filter
+    ball_raw_conf: List[Optional[float]] = []   # YOLO confidence (0-1)
     tips: List[Optional[np.ndarray]] = []       # (2,) px
 
     smoothed: Optional[np.ndarray] = None
@@ -183,13 +193,19 @@ def _detect_pass(input_path: str) -> Dict[str, Any]:
                 else:
                     tips.append(None)
 
-                ball = tracker._detect_ball_yolo(frame)
-                balls.append(np.array(ball, dtype=np.float32) if ball else None)
+                ball = tracker._detect_ball_yolo_with_conf(frame)
+                if ball is not None:
+                    ball_raw.append(np.array([ball[0], ball[1]], dtype=np.float32))
+                    ball_raw_conf.append(float(ball[2]))
+                else:
+                    ball_raw.append(None)
+                    ball_raw_conf.append(None)
             else:
                 mp_xy.append(None)
                 mp_vis.append(None)
                 coco.append(None)
-                balls.append(None)
+                ball_raw.append(None)
+                ball_raw_conf.append(None)
                 tips.append(None)
                 missed += 1
                 if missed > MAX_MISSED_FRAMES:
@@ -203,7 +219,11 @@ def _detect_pass(input_path: str) -> Dict[str, Any]:
     return {
         "fps": fps, "width": width, "height": height,
         "mp_xy": mp_xy, "mp_vis": mp_vis, "coco": coco,
-        "balls": balls, "tips": tips, "n": idx,
+        # raw (unfiltered) detections + a pre-filtered copy for downstream use;
+        # _filter_ball_detections() replaces "balls" with the kept positions
+        "ball_raw": ball_raw, "ball_raw_conf": ball_raw_conf,
+        "balls": list(ball_raw), "ball_conf": list(ball_raw_conf),
+        "tips": tips, "n": idx,
     }
 
 
@@ -521,6 +541,192 @@ def _ball_speed_at(det, i: int) -> Optional[float]:
     if nxt is not None:
         speeds.append(float(np.hypot(*(det["balls"][nxt] - b))) / (nxt - i))
     return float(np.mean(speeds))
+
+
+# ════════════════════════════════════════════════════════════════════════
+# BALL TRACKING — filtering, stats, video overlay, debug render
+# ════════════════════════════════════════════════════════════════════════
+def _body_box(det, i: int, margin: float):
+    """Bounding box of the batter's visible body landmarks in px, or None."""
+    xy = det["mp_xy"][i] if i < len(det["mp_xy"]) else None
+    vis = det["mp_vis"][i] if i < len(det["mp_vis"]) else None
+    if xy is None or vis is None:
+        return None
+    m = vis >= 0.3
+    if not bool(m.any()):
+        return None
+    pts = xy[m]
+    x0, y0 = float(pts[:, 0].min()), float(pts[:, 1].min())
+    x1, y1 = float(pts[:, 0].max()), float(pts[:, 1].max())
+    dx = max((x1 - x0) * margin, 5.0)
+    dy = max((y1 - y0) * margin, 5.0)
+    return x0 - dx, y0 - dy, x1 + dx, y1 + dy
+
+
+def _filter_ball_detections(det, cfg) -> Dict[str, int]:
+    """Filter raw YOLO ball detections.
+
+    Gates (all thresholds in CONFIG):
+      1. BALL_CONF_MIN      — drop detections below this confidence
+      2. BALL_MAX_JUMP_PX   — drop a detection that jumps more than
+                              0.25 * frame width from the previous kept
+                              position within 3 frames
+      3. body box           — drop detections inside the batter's body box
+                              unless the ball is near the bat (shoes,
+                              bottles, shadows)
+
+    Overwrites det["balls"] with the kept positions and stores per-frame
+    confidence in det["ball_conf"]. Raw detections stay in det["ball_raw"]
+    / det["ball_raw_conf"] for stats and the debug video.
+    Returns rejection counts.
+    """
+    w = det["width"]
+    conf_min = cfg["ball_conf_min"]
+    jump_px = cfg["ball_max_jump_ratio"] * w            # BALL_MAX_JUMP_PX
+    near_bat_px = cfg["ball_near_bat_ratio"] * min(det["width"], det["height"])
+    margin = cfg["ball_body_margin"]
+
+    kept: List[Optional[np.ndarray]] = []
+    kept_conf: List[Optional[float]] = []
+    rejected = {"low_conf": 0, "jump": 0, "body_box": 0}
+    last_i: Optional[int] = None
+    last_p: Optional[np.ndarray] = None
+
+    for i in range(det["n"]):
+        raw = det["ball_raw"][i] if i < len(det["ball_raw"]) else None
+        rc = det["ball_raw_conf"][i] if i < len(det["ball_raw_conf"]) else None
+        if raw is None:
+            kept.append(None)
+            kept_conf.append(None)
+            continue
+
+        # 1) confidence gate
+        if rc is not None and rc < conf_min:
+            rejected["low_conf"] += 1
+            kept.append(None)
+            kept_conf.append(None)
+            continue
+
+        # 2) jump gate — too far from previous kept position within 3 frames
+        if (last_p is not None and last_i is not None and (i - last_i) <= 3
+                and float(np.hypot(*(raw - last_p))) > jump_px):
+            rejected["jump"] += 1
+            kept.append(None)
+            kept_conf.append(None)
+            continue
+
+        # 3) body-box gate — inside the batter box only if near the bat
+        box = _body_box(det, i, margin)
+        if box is not None and box[0] <= raw[0] <= box[2] and box[1] <= raw[1] <= box[3]:
+            tip = det["tips"][i] if i < len(det["tips"]) else None
+            near_bat = tip is not None and float(np.hypot(*(raw - tip))) <= near_bat_px
+            if not near_bat:
+                rejected["body_box"] += 1
+                kept.append(None)
+                kept_conf.append(None)
+                continue
+
+        kept.append(np.array(raw, dtype=np.float32))
+        kept_conf.append(float(rc) if rc is not None else None)
+        last_i, last_p = i, raw
+
+    det["balls"] = kept
+    det["ball_conf"] = kept_conf
+    return rejected
+
+
+def _ball_tracking_stats(det, cfg, rejected: Dict[str, int], tracker) -> Dict[str, Any]:
+    """Detection statistics for the JSON report (see spec: ball_tracking)."""
+    n = det["n"]
+    with_ball = sum(1 for p in det["balls"] if p is not None)
+    confs = [c for c in det.get("ball_conf", []) if c is not None]
+    model = (Path(tracker.model_path).name
+             if tracker is not None and getattr(tracker, "model_path", None)
+             else "none")
+    return {
+        "frames_total": n,
+        "frames_with_ball": with_ball,
+        "detection_rate": round(with_ball / n, 3) if n else 0.0,
+        "avg_confidence": round(sum(confs) / len(confs), 3) if confs else 0.0,
+        "model": model,
+        "conf_threshold": cfg["ball_conf_min"],
+        "status": "ok" if with_ball >= cfg["ball_min_frames"] else "not detected",
+        "rejected": dict(rejected),
+    }
+
+
+def _draw_ball_overlay(frame, i: int, det: dict, trail: List[Any], cfg) -> None:
+    """Draw the kept ball detection: circle + 'ball 0.62' label + fading trail.
+
+    Frames with no detection get no ball drawing at all.
+    """
+    import cv2
+
+    balls = det.get("balls_vis")
+    if balls is None:
+        balls = det.get("balls") or []
+    if i >= len(balls) or balls[i] is None:
+        return
+    confs = det.get("ball_conf") or []
+    pos = balls[i]
+    conf = confs[i] if i < len(confs) else None
+
+    h, w = frame.shape[:2]
+    scale = max(0.6, min(h, w) / 700.0)
+
+    # --- fading trail of the last N ball positions ---
+    trail.append((i, np.array(pos, dtype=np.float32)))
+    max_len = int(cfg.get("ball_trail_len", 15))
+    gap = int(cfg.get("ball_trail_gap", 30))
+    if len(trail) >= 2 and i - trail[-2][0] > gap:
+        trail[:] = trail[-1:]          # long gap — restart the trail
+    while len(trail) > max_len:
+        trail.pop(0)
+    m = len(trail)
+    for k, (fi, p) in enumerate(trail):
+        a = (k + 1) / m                # oldest = faintest
+        r = int(round((2.0 + 3.0 * a) * scale))
+        color = (0, int(210 * a), int(255 * a))   # orange fading out
+        cv2.circle(frame, (int(p[0]), int(p[1])), r, color,
+                   max(1, int(round(a * 2))), cv2.LINE_AA)
+
+    # --- current detection: circle + confidence label ---
+    cx, cy = int(pos[0]), int(pos[1])
+    r = int(round(6 * scale))
+    cv2.circle(frame, (cx, cy), r, (0, 255, 255),
+               max(2, int(round(2 * scale))), cv2.LINE_AA)
+    cv2.circle(frame, (cx, cy), max(2, int(round(2 * scale))),
+               (255, 255, 255), -1, cv2.LINE_AA)
+    label = f"ball {conf:.2f}" if conf is not None else "ball"
+    _put_text(frame, label, (cx + r + 4, max(14, cy - r - 4)),
+              (0, 255, 255), scale=0.55 * max(scale, 0.6), thickness=1)
+
+
+def _draw_ball_debug(frame, i: int, det: dict) -> None:
+    """Debug overlay: every raw detection (pre-filter) red, kept green."""
+    import cv2
+
+    raws = det.get("ball_raw") or []
+    raw_confs = det.get("ball_raw_conf") or []
+    if i < len(raws) and raws[i] is not None:
+        p = raws[i]
+        c = raw_confs[i] if i < len(raw_confs) and raw_confs[i] is not None else None
+        cv2.circle(frame, (int(p[0]), int(p[1])), 8, (0, 0, 255), 2, cv2.LINE_AA)
+        _put_text(frame, f"raw {c:.2f}" if c is not None else "raw",
+                  (int(p[0]) + 10, int(p[1]) - 9), (0, 0, 255),
+                  scale=0.5, thickness=1)
+
+    kept = det.get("balls_vis")
+    if kept is None:
+        kept = det.get("balls") or []
+    kept_confs = det.get("ball_conf") or []
+    if i < len(kept) and kept[i] is not None:
+        p = kept[i]
+        c = kept_confs[i] if i < len(kept_confs) and kept_confs[i] is not None else None
+        cv2.circle(frame, (int(p[0]), int(p[1])), 5, (0, 255, 0), -1, cv2.LINE_AA)
+        _put_text(frame, f"ball {c:.2f}" if c is not None else "ball",
+                  (int(p[0]) + 10, int(p[1]) + 18), (0, 255, 0),
+                  scale=0.5, thickness=1)
 
 
 def _ball_plausible(det, cfg) -> Tuple[bool, str]:
@@ -1007,7 +1213,8 @@ def _draw_hud(frame, i: int, det: dict, wt: dict, hb: dict, ff: dict,
 
 
 def _write_annotated(input_path: str, output_path: str, det: dict, report: dict,
-                     phases: Dict[str, Optional[int]], feet: Dict[str, Any]) -> None:
+                     phases: Dict[str, Optional[int]], feet: Dict[str, Any],
+                     debug_path: Optional[str] = None) -> None:
     import cv2
 
     cfg = CONFIG
@@ -1024,23 +1231,41 @@ def _write_annotated(input_path: str, output_path: str, det: dict, report: dict,
         writer.release()
         raise RuntimeError(f"Could not create video writer for: {output_path}")
 
+    # optional ball-debug video: raw detections red, kept detections green
+    debug_writer = None
+    if debug_path:
+        Path(debug_path).parent.mkdir(parents=True, exist_ok=True)
+        debug_writer, _ = _open_writer(debug_path, det["fps"], det["width"], det["height"])
+        if hasattr(debug_writer, "isOpened") and not debug_writer.isOpened():
+            debug_writer = None
+
+    trail: List[Any] = []          # (frame_idx, pos) — fading ball trail
     i = 0
     try:
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
+            if debug_writer is not None:
+                dbg = frame.copy()
+                _draw_ball_debug(dbg, i, det)
+                debug_writer.write(dbg)
             if i < det["n"]:
                 _draw_hud(frame, i, det, report["weight_transfer"], report["head_balance"],
                           report["front_foot"], phases, contact, feet, cfg)
+                _draw_ball_overlay(frame, i, det, trail, cfg)
             writer.write(frame)
             i += 1
     finally:
         cap.release()
         writer.release()
+        if debug_writer is not None:
+            debug_writer.release()
 
     if backend == "ffmpeg_h264" and (not Path(output_path).exists() or Path(output_path).stat().st_size == 0):
         raise RuntimeError(f"ffmpeg failed to write: {output_path}")
+    if debug_path and (not Path(debug_path).exists() or Path(debug_path).stat().st_size == 0):
+        print(f"[ball_tracking] WARNING: debug video not written: {debug_path}")
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -1051,6 +1276,7 @@ def analyze_cricket_shot(
     output_path: str,
     shot_direction: Optional[float] = None,
     batter_hand: str = "right",
+    debug_ball: bool = False,
 ) -> dict:
     """Analyze a cricket batting shot and write an HUD-annotated video.
 
@@ -1060,26 +1286,56 @@ def analyze_cricket_shot(
         shot_direction: Shot direction in degrees (image space). Used only
             when the ball exit trajectory cannot be measured.
         batter_hand:  "right" | "left" (selects the front foot).
+        debug_ball:   Also save "ball_debug_<id>.mp4" next to the output with
+            every raw YOLO detection in red and kept (filtered) ones in green.
+            (Can also be forced via CONFIG["ball_debug"] = True.)
 
     Returns:
-        The JSON report dict. The same report is saved next to the video
-        as ``<output stem>.json``.
+        The JSON report dict (includes "ball_tracking" detection stats).
+        The same report is saved next to the video as ``<output stem>.json``.
     """
     cfg = CONFIG
     if batter_hand not in ("right", "left"):
         batter_hand = "right"
 
-    # 1) detect pose + ball + bat tip
+    # 1) detect pose + raw ball + bat tip
     det = _detect_pass(input_path)
     if det["n"] == 0:
         raise ValueError(f"No frames read from video: {input_path}")
 
-    # 1a) ball-track plausibility — erratic YOLO false positives (shadow
-    #     practice, no visible ball) are discarded before any ball metric
-    plausible, why = _ball_plausible(det, cfg)
+    # 1a) ball filtering — confidence / jump / body-box gates
+    tracker = _get_tracker()
+    rejected = _filter_ball_detections(det, cfg)
+    # keep the filtered track for the video overlay / debug render even if a
+    # gate below clears the metric-facing track
+    det["balls_vis"] = list(det["balls"])
+
+    # 1b) ball-tracking stats: printed and saved under report["ball_tracking"]
+    ball_tracking = _ball_tracking_stats(det, cfg, rejected, tracker)
+    gate_note: Optional[str] = None
+    if ball_tracking["status"] == "not detected":
+        # too few detections — no other metric may use the ball
+        gate_note = (f"ball_tracking: only {ball_tracking['frames_with_ball']} frames "
+                     f"with ball (<{cfg['ball_min_frames']})")
+        det["balls"] = [None] * det["n"]
+    print(f"[ball_tracking] {ball_tracking['frames_with_ball']}/"
+          f"{ball_tracking['frames_total']} frames "
+          f"({ball_tracking['detection_rate']:.1%}), "
+          f"avg_conf={ball_tracking['avg_confidence']:.2f}, "
+          f"model={ball_tracking['model']}, "
+          f"conf_min={ball_tracking['conf_threshold']}, "
+          f"status={ball_tracking['status']}, "
+          f"rejected={ball_tracking['rejected']}")
+
+    # 1c) ball-track plausibility — evaluated on the RAW YOLO track (its
+    #     original behaviour): a cluster-hopping raw track means the
+    #     detections themselves are false positives (shadow practice, wall
+    #     objects), no matter how clean the per-detection filters left them.
+    #     On failure no metric may use the ball.
+    plausible, why = _ball_plausible({**det, "balls": det["ball_raw"]}, cfg)
     if not plausible:
         det["balls"] = [None] * det["n"]
-        det["ball_note"] = why
+        det["ball_note"] = gate_note or why
 
     # 1b) front foot: planted (lower) foot if one is clearly airborne
     feet = _choose_front_foot(det, batter_hand, cfg)
@@ -1119,11 +1375,20 @@ def analyze_cricket_shot(
             "value_deg": round(shot_dir, 1) if shot_dir is not None else None,
             "source": shot_src,
         },
+        "ball_tracking": ball_tracking,
     }
     report["feedback"] = _build_feedback(report)
 
-    # 6) annotated video (skeleton + HUD)
-    _write_annotated(input_path, output_path, det, report, phases, feet)
+    # 6) annotated video (skeleton + HUD + ball overlay)
+    debug_path: Optional[str] = None
+    if debug_ball or cfg.get("ball_debug"):
+        stem = Path(output_path).stem
+        aid = stem[len("cricket_"):] if stem.startswith("cricket_") else stem
+        debug_path = str(Path(output_path).with_name(f"ball_debug_{aid}.mp4"))
+    _write_annotated(input_path, output_path, det, report, phases, feet,
+                     debug_path=debug_path)
+    if debug_path:
+        print(f"[ball_tracking] debug video: {debug_path}")
 
     # 7) JSON report next to the video
     json_path = Path(output_path).with_suffix(".json")

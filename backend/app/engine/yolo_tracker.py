@@ -44,19 +44,33 @@ class CricketObjectTracker:
         except Exception:
             self.yolo_model = None
 
-    def _detect_ball_yolo(self, cv_frame) -> Optional[List[float]]:
+    def _detect_ball_yolo_with_conf(self, cv_frame) -> Optional[Tuple[float, float, float]]:
+        """Best 'ball' detection as (center_x, center_y, confidence) or None.
+
+        Picks the highest-confidence ball box when several are returned so the
+        caller can apply its own confidence gate and log detection stats.
+        """
         if self.yolo_model is None:
             return None
         try:
             res = self.yolo_model(cv_frame, verbose=False)[0]
+            best: Optional[Tuple[float, float, float]] = None
             for box in res.boxes:
                 cls_name = res.names.get(int(box.cls[0]), "")
                 if "ball" in cls_name.lower():
                     xyxy = box.xyxy[0].tolist()
-                    return [(xyxy[0] + xyxy[2]) / 2.0, (xyxy[1] + xyxy[3]) / 2.0]
+                    conf = float(box.conf[0])
+                    if best is None or conf > best[2]:
+                        best = ((xyxy[0] + xyxy[2]) / 2.0,
+                                (xyxy[1] + xyxy[3]) / 2.0, conf)
+            return best
         except Exception:
             pass
         return None
+
+    def _detect_ball_yolo(self, cv_frame) -> Optional[List[float]]:
+        det = self._detect_ball_yolo_with_conf(cv_frame)
+        return [det[0], det[1]] if det is not None else None
 
     @staticmethod
     def _kinematic_bat_proxy(
