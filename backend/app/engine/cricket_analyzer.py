@@ -720,22 +720,22 @@ def _draw_ball_overlay(frame, i: int, det: dict, trail: List[Any], cfg) -> None:
         fi_a, p_a = trail[k - 1]
         fi_b, p_b = trail[k]
         a = k / m                      # 0 = oldest (faintest), 1 = newest (brightest)
-        thickness = max(1, int(round(2.5 * a * scale)))
-        # Bright cyan arc (BGR) — distinct from skeleton/pose colours
-        color = (int(255 * a), int(220 * a), int(60 * a))
+        # Heavy dark red arc — BGR (0,0,255) pure red, scaled by age
+        color = (0, 0, int(220 * a))
+        thickness = max(2, int(round(4.0 * a * scale)))
         cv2.line(frame, (int(p_a[0]), int(p_a[1])),
                  (int(p_b[0]), int(p_b[1])), color, thickness, cv2.LINE_AA)
 
-    # --- current detection: circle + confidence label ---
+    # --- current detection: heavy red circle + confidence label ---
     cx, cy = int(pos[0]), int(pos[1])
-    r = int(round(6 * scale))
-    cv2.circle(frame, (cx, cy), r, (0, 255, 255),
-               max(2, int(round(2 * scale))), cv2.LINE_AA)
-    cv2.circle(frame, (cx, cy), max(2, int(round(2 * scale))),
+    r = int(round(7 * scale))
+    cv2.circle(frame, (cx, cy), r, (0, 0, 220),
+               max(3, int(round(3 * scale))), cv2.LINE_AA)
+    cv2.circle(frame, (cx, cy), max(3, int(round(2.5 * scale))),
                (255, 255, 255), -1, cv2.LINE_AA)
     label = f"ball {conf:.2f}" if conf is not None else "ball"
     _put_text(frame, label, (cx + r + 4, max(14, cy - r - 4)),
-              (0, 255, 255), scale=0.55 * max(scale, 0.6), thickness=1)
+              (0, 0, 220), scale=0.65 * max(scale, 0.6), thickness=2)
 
 
 def _draw_ball_debug(frame, i: int, det: dict) -> None:
