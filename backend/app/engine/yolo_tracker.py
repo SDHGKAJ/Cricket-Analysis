@@ -225,18 +225,22 @@ class CricketObjectTracker:
         self._color_blob_consec: Dict[Tuple[int, int], int] = {}    # consecutive count per position
         self._last_frame_positions: set = set()                     # positions seen in previous frame
         self._static_positions: set = set()
+        self._last_accepted_pos: Optional[Tuple[float, float]] = None  # last accepted ball pos
+        self._static_run: int = 0                                   # consecutive frames at same pos
         self._last_ball_pos: Optional[Tuple[float, float]] = None   # last accepted ball position
         self._static_frames: int = 0                                # frames at same position
-        self._STATIC_CUMULATIVE = 2      # seen in 2+ frames total -> static
-        self._STATIC_CONSEC_FRAMES = 2   # seen in 2+ consecutive frames -> static
-        self._STATIC_POS_TOL = 10        # px tolerance for position match
+        self._STATIC_CUMULATIVE = 10     # seen in 10+ frames total -> static
+        self._STATIC_CONSEC_FRAMES = 10  # seen in 10+ consecutive frames -> static
+        self._STATIC_POS_TOL = 5         # px tolerance for position match (~5px static)
         self._COLOR_BLOB_MIN_AREA_RATIO = 0.0002  # 0.02% of frame (very tight)
         self._COLOR_BLOB_MAX_AREA_RATIO = 0.001   # 0.1% of frame (reject large objects like kettle/wall items)
         self._COLOR_BLOB_MIN_CIRCULARITY = 0.80   # very strict circularity (cricket ball is perfectly round)
         # YOLO box size limit: cricket balls are small, reject boxes >1.5% of frame
         self._YOLO_MAX_BOX_AREA_RATIO = 0.015
-        # Movement: real ball must move at least this many px between frames
-        self._BALL_MIN_MOVE_PX = 3.0
+        # Ball confidence minimum — reject detections below this
+        self.BALL_CONF_MIN = 0.5
+        # Max jump pixels between consecutive frames — reject larger jumps
+        self.BALL_MAX_JUMP_PX = 150
         # Max dimension for color-blob: reject anything larger than a cricket ball would appear
         self._COLOR_BLOB_MAX_DIM = 40  # max width or height of blob in px
 
@@ -419,35 +423,47 @@ class CricketObjectTracker:
         # Update static tracking with every candidate from both detectors
         self._update_static_tracking([(c[0], c[1], c[2]) for c in candidates])
 
-        # Filter to non-static positions only
-        non_static = [c for c in candidates if not self._is_static_position(c[0], c[1])]
+        # --- Gate 1: confidence ---
+        conf_filtered = [c for c in candidates if c[2] >= self.BALL_CONF_MIN]
 
-        # --- Movement filter: real balls move fast; static objects don't ---
-        moved_candidates: List[Tuple[float, float, float, str]] = []
-        for c in non_static:
+        # --- Gate 2: static background (within ~5px for 10+ frames) ---
+        static_filtered: List[Tuple[float, float, float, str]] = []
+        for c in conf_filtered:
             cx, cy = c[0], c[1]
-            if self._last_ball_pos is not None:
-                dx = cx - self._last_ball_pos[0]
-                dy = cy - self._last_ball_pos[1]
+            q = self._quantize_pos(cx, cy)
+            if q in self._static_positions:
+                continue  # known static position — reject
+            # Check if this position has been seen for 10+ consecutive frames
+            if self._last_frame_positions and any(
+                    self._near_pos(q, lq) for lq in self._last_frame_positions):
+                self._static_run += 1
+            else:
+                self._static_run = 0
+            if self._static_run >= self._STATIC_CONSEC_FRAMES:
+                self._static_positions.add(q)
+                continue
+            static_filtered.append(c)
+
+        # --- Gate 3: max jump from last accepted position ---
+        jump_filtered: List[Tuple[float, float, float, str]] = []
+        for c in static_filtered:
+            cx, cy = c[0], c[1]
+            if self._last_accepted_pos is not None:
+                dx = cx - self._last_accepted_pos[0]
+                dy = cy - self._last_accepted_pos[1]
                 dist = (dx * dx + dy * dy) ** 0.5
-                if dist < self._BALL_MIN_MOVE_PX:
-                    self._static_frames += 1
-                    continue
-            self._last_ball_pos = (cx, cy)
-            self._static_frames = 0
-            moved_candidates.append(c)
+                if dist > self.BALL_MAX_JUMP_PX:
+                    continue  # too far — likely false positive jumping to background
+            self._last_accepted_pos = (cx, cy)
+            jump_filtered.append(c)
 
-        if self._static_frames > 10:
-            self._last_ball_pos = None
-            self._static_frames = 0
-
-        if not moved_candidates:
+        if not jump_filtered:
             return None
 
         # Prefer colour-blob (high circularity + cricket-ball colour) over YOLO.
         # If YOLO confidence is very high (>= 0.6), prefer YOLO instead.
-        color_blob_candidates = [c for c in moved_candidates if c[3] == "color_blob"]
-        yolo_candidates = [c for c in moved_candidates if c[3] == "yolo"]
+        color_blob_candidates = [c for c in jump_filtered if c[3] == "color_blob"]
+        yolo_candidates = [c for c in jump_filtered if c[3] == "yolo"]
 
         if yolo_candidates:
             best_yolo = max(yolo_candidates, key=lambda c: c[2])

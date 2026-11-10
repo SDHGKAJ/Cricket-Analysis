@@ -72,11 +72,11 @@ CONFIG: Dict[str, Any] = {
     "ball_teleport_ratio": 0.20,    # consecutive jump > ratio*min(w,h) counts as a teleport (tighter)
     "ball_max_teleports": 3,        # more teleports than this = cluster-hopping false positive (tighter)
     # -- ball tracking: visibility & verification ---------------------------
-    "ball_conf_min": 0.30,          # BALL_CONF_MIN: balance between catching ball and filtering noise
-    "ball_max_jump_ratio": 0.22,    # BALL_MAX_JUMP_PX = allow faster ball movement (was 0.18)
+    "ball_conf_min": 0.5,           # BALL_CONF_MIN: reject detections below this confidence
+    "ball_max_jump_px": 150,        # BALL_MAX_JUMP_PX: reject jumps farther than this (px)
     "ball_min_frames": 5,           # MIN_BALL_FRAMES: below this -> status "not detected"
     "ball_trail_len": 15,           # fading trail length on the output video
-    "ball_trail_gap": 30,           # restart the trail after this many frames without ball
+    "ball_trail_gap": 5,            # end trail after this many frames without detection
     "ball_body_margin": 0.04,       # expand batter body box (fraction of its size, min 5 px)
     "ball_near_bat_ratio": 0.12,    # inside body box kept if within this*min(w,h) of bat tip
     "ball_debug": False,            # True -> also save ball_debug_<id>.mp4 (raw=red, kept=green)
@@ -594,9 +594,8 @@ def _filter_ball_detections(det, cfg) -> Dict[str, int]:
     det["ball_raw_source"] for stats and the debug video.
     Returns rejection counts.
     """
-    w = det["width"]
     conf_min = cfg["ball_conf_min"]
-    jump_px = cfg["ball_max_jump_ratio"] * w            # BALL_MAX_JUMP_PX
+    jump_px = cfg["ball_max_jump_px"]                   # BALL_MAX_JUMP_PX (fixed pixels)
     near_bat_px = cfg["ball_near_bat_ratio"] * min(det["width"], det["height"])
     margin = cfg["ball_body_margin"]
     raw_sources = det.get("ball_raw_source") or [None] * det["n"]
@@ -709,9 +708,9 @@ def _draw_ball_overlay(frame, i: int, det: dict, trail: List[Any], cfg) -> None:
     # --- thick smooth broadcast-style red arc trail (single continuous polyline) ---
     trail.append((i, np.array(pos, dtype=np.float32)))
     max_len = int(cfg.get("ball_trail_len", 15))
-    gap = int(cfg.get("ball_trail_gap", 30))
+    gap = int(cfg.get("ball_trail_gap", 5))
     if len(trail) >= 2 and i - trail[-2][0] > gap:
-        trail[:] = trail[-1:]          # long gap — restart the trail
+        trail.clear()                  # end trail — do NOT connect to next detection
     while len(trail) > max_len:
         trail.pop(0)
     m = len(trail)
