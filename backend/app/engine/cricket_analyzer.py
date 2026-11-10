@@ -706,7 +706,7 @@ def _draw_ball_overlay(frame, i: int, det: dict, trail: List[Any], cfg) -> None:
     h, w = frame.shape[:2]
     scale = max(0.6, min(h, w) / 700.0)
 
-    # --- thick smooth broadcast-style red arc trail ---
+    # --- thick smooth broadcast-style red arc trail (single continuous polyline) ---
     trail.append((i, np.array(pos, dtype=np.float32)))
     max_len = int(cfg.get("ball_trail_len", 15))
     gap = int(cfg.get("ball_trail_gap", 30))
@@ -715,17 +715,18 @@ def _draw_ball_overlay(frame, i: int, det: dict, trail: List[Any], cfg) -> None:
     while len(trail) > max_len:
         trail.pop(0)
     m = len(trail)
-    # Draw each segment thick, newest brightest/thickest — broadcast ball-path look
-    base_thick = max(6, int(round(12 * scale)))
-    for k in range(1, m):
-        p_a = trail[k - 1][1]
-        p_b = trail[k][1]
-        a = k / m                      # 0 = oldest, 1 = newest
-        # Bright red (BGR: 0,0,255), scaled by age for fade effect
-        color = (0, 0, int(235 * a))
-        thickness = max(4, int(round(base_thick * a * 0.7 + base_thick * 0.3)))
-        cv2.line(frame, (int(p_a[0]), int(p_a[1])),
-                 (int(p_b[0]), int(p_b[1])), color, thickness, cv2.LINE_AA)
+    if m >= 2:
+        # Build point array for one continuous polyline stroke — broadcast look
+        pts = np.array([p for _, p in trail], dtype=np.int32)
+        # Draw as one thick continuous arc; opacity fades from oldest to newest
+        base_thick = max(6, int(round(12 * scale)))
+        for k in range(1, m):
+            a = k / (m - 1)            # 0 = oldest, 1 = newest
+            color = (0, 0, int(235 * a))   # bright red, fade by age
+            thickness = max(4, int(round(base_thick * (0.3 + 0.7 * a))))
+            cv2.line(frame, (int(trail[k-1][1][0]), int(trail[k-1][1][1])),
+                     (int(trail[k][1][0]), int(trail[k][1][1])),
+                     color, thickness, cv2.LINE_AA)
 
     # --- current detection: heavy red circle + confidence label ---
     cx, cy = int(pos[0]), int(pos[1])
