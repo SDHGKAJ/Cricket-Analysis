@@ -69,11 +69,11 @@ CONFIG: Dict[str, Any] = {
     "traj_body_dist_ratio": 0.35,   # ball must be within this*min(w,h) of bat/body at turn
     "ball_min_dets": 6,             # min detections before a ball track can be trusted
     "ball_max_curv_ratio": 0.06,    # median 2nd-diff of track <= this*min(w,h) (smoothness)
-    "ball_teleport_ratio": 0.25,    # consecutive jump > ratio*min(w,h) counts as a teleport
-    "ball_max_teleports": 5,        # more teleports than this = cluster-hopping false positive
+    "ball_teleport_ratio": 0.20,    # consecutive jump > ratio*min(w,h) counts as a teleport (tighter)
+    "ball_max_teleports": 3,        # more teleports than this = cluster-hopping false positive (tighter)
     # -- ball tracking: visibility & verification ---------------------------
-    "ball_conf_min": 0.25,          # BALL_CONF_MIN: ignore detections below this confidence
-    "ball_max_jump_ratio": 0.25,    # BALL_MAX_JUMP_PX = ratio * frame width (jump filter)
+    "ball_conf_min": 0.35,          # BALL_CONF_MIN: raised from 0.25 to filter more false positives
+    "ball_max_jump_ratio": 0.18,    # BALL_MAX_JUMP_PX = tighter ratio to reject erratic jumps
     "ball_min_frames": 5,           # MIN_BALL_FRAMES: below this -> status "not detected"
     "ball_trail_len": 15,           # fading trail length on the output video
     "ball_trail_gap": 30,           # restart the trail after this many frames without ball
@@ -155,6 +155,12 @@ def _detect_pass(input_path: str) -> Dict[str, Any]:
 
     pose = create_pose_detector()
     tracker = _get_tracker()
+
+    # Reset per-video static-object state so previous clips don't pollute results
+    tracker._color_blob_history.clear()
+    tracker._color_blob_consec.clear()
+    tracker._last_frame_positions = set()
+    tracker._static_positions = set()
 
     mp_xy: List[Optional[np.ndarray]] = []      # (33, 2) px
     mp_vis: List[Optional[np.ndarray]] = []     # (33,)

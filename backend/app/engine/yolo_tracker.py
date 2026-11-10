@@ -225,12 +225,12 @@ class CricketObjectTracker:
         self._color_blob_consec: Dict[Tuple[int, int], int] = {}    # consecutive count per position
         self._last_frame_positions: set = set()                     # positions seen in previous frame
         self._static_positions: set = set()
-        self._STATIC_CUMULATIVE = 8      # seen in 8+ frames total -> static
-        self._STATIC_CONSEC_FRAMES = 5   # seen in 5+ consecutive frames -> static
-        self._STATIC_POS_TOL = 16        # px tolerance for position match
-        self._COLOR_BLOB_MIN_AREA_RATIO = 0.0002  # 0.02% of frame (tiny noise out)
-        self._COLOR_BLOB_MAX_AREA_RATIO = 0.004   # 0.4% of frame (kettle-scale out)
-        self._COLOR_BLOB_MIN_CIRCULARITY = 0.6
+        self._STATIC_CUMULATIVE = 5      # seen in 5+ frames total -> static (tighter)
+        self._STATIC_CONSEC_FRAMES = 3   # seen in 3+ consecutive frames -> static (tighter)
+        self._STATIC_POS_TOL = 12        # px tolerance for position match (tighter)
+        self._COLOR_BLOB_MIN_AREA_RATIO = 0.0003  # 0.03% of frame (tighter — fewer noise blobs)
+        self._COLOR_BLOB_MAX_AREA_RATIO = 0.002   # 0.2% of frame (tighter — reject large objects)
+        self._COLOR_BLOB_MIN_CIRCULARITY = 0.72   # stricter circularity (cricket ball is very round)
 
     def _init_detector(self):
         if not self.model_path or not Path(self.model_path).exists():
@@ -297,16 +297,17 @@ class CricketObjectTracker:
         # frames; a real cricket ball moves. Positions seen for
         # _STATIC_CONSEC_FRAMES consecutive frames are classed as static and
         # rejected by both detectors.
-        candidates: List[Tuple[float, float, float]] = []  # (cx, cy, conf)
+        candidates: List[Tuple[float, float, float, str]] = []  # (cx, cy, conf, source)
 
         # --- Colour-blob candidates ---
         try:
             hsv = cv2.cvtColor(cv_frame, cv2.COLOR_BGR2HSV)
-            lower_orange = np.array([5, 100, 100])
-            upper_orange = np.array([25, 255, 255])
-            lower_red1 = np.array([0, 100, 100])
-            upper_red1 = np.array([10, 255, 255])
-            lower_red2 = np.array([170, 100, 100])
+            # Tighter HSV ranges: proper cricket-ball orange/red only
+            lower_orange = np.array([8, 130, 120])
+            upper_orange = np.array([22, 255, 255])
+            lower_red1 = np.array([0, 130, 120])
+            upper_red1 = np.array([8, 255, 255])
+            lower_red2 = np.array([172, 130, 120])
             upper_red2 = np.array([180, 255, 255])
             mask = cv2.bitwise_or(
                 cv2.bitwise_or(
@@ -322,6 +323,7 @@ class CricketObjectTracker:
             h, w = cv_frame.shape[:2]
             min_area = (w * h) * self._COLOR_BLOB_MIN_AREA_RATIO
             max_area = (w * h) * self._COLOR_BLOB_MAX_AREA_RATIO
+            blob_candidates = []
             for cnt in contours:
                 area = cv2.contourArea(cnt)
                 if area < min_area or area > max_area:
@@ -335,10 +337,19 @@ class CricketObjectTracker:
                 M = cv2.moments(cnt)
                 if M["m00"] == 0:
                     continue
-                cx = M["m10"] / M["m00"]
-                cy = M["m01"] / M["m00"]
-                conf = min(0.85, circularity * 0.6 + 0.25)
-                candidates.append((cx, cy, conf))
+                cx_b = M["m10"] / M["m00"]
+                cy_b = M["m01"] / M["m00"]
+                # Aspect-ratio check: bounding rect should be roughly square
+                x, y, bw, bh = cv2.boundingRect(cnt)
+                aspect = min(bw, bh) / max(bw, bh) if max(bw, bh) > 0 else 0
+                if aspect < 0.55:  # reject elongated blobs (not a ball)
+                    continue
+                conf = min(0.90, circularity * 0.65 + 0.25)
+                blob_candidates.append((cx_b, cy_b, conf, "color_blob"))
+            # Keep only the most circular blob per frame (avoid multi-blob false positives)
+            if blob_candidates:
+                blob_candidates.sort(key=lambda c: c[2], reverse=True)
+                candidates.append(blob_candidates[0])
         except Exception:
             pass
 
@@ -350,15 +361,21 @@ class CricketObjectTracker:
                     cls_name = res.names.get(int(box.cls[0]), "")
                     if "ball" in cls_name.lower():
                         xyxy = box.xyxy[0].tolist()
-                        cx = (xyxy[0] + xyxy[2]) / 2.0
-                        cy = (xyxy[1] + xyxy[3]) / 2.0
+                        bw = xyxy[2] - xyxy[0]
+                        bh = xyxy[3] - xyxy[1]
+                        # Reject detections with very poor aspect ratio
+                        aspect = min(bw, bh) / max(bw, bh) if max(bw, bh) > 0 else 0
+                        if aspect < 0.4:
+                            continue
+                        cx_y = (xyxy[0] + xyxy[2]) / 2.0
+                        cy_y = (xyxy[1] + xyxy[3]) / 2.0
                         conf = float(box.conf[0])
-                        candidates.append((cx, cy, conf))
+                        candidates.append((cx_y, cy_y, conf, "yolo"))
             except Exception:
                 pass
 
         # Update static tracking with every candidate from both detectors
-        self._update_static_tracking(candidates)
+        self._update_static_tracking([(c[0], c[1], c[2]) for c in candidates])
 
         # Filter to non-static positions only
         non_static = [c for c in candidates if not self._is_static_position(c[0], c[1])]
@@ -366,14 +383,25 @@ class CricketObjectTracker:
         if not non_static:
             return None
 
-        # Prefer colour-blob (cricket-ball colour, conf 0.5 floor) over YOLO;
-        # otherwise pick the highest confidence detection.
-        color_blob_candidates = [c for c in non_static if c[2] <= 0.85]
+        # Prefer colour-blob (high circularity + cricket-ball colour) over YOLO.
+        # If YOLO confidence is very high (>= 0.6), prefer YOLO instead.
+        color_blob_candidates = [c for c in non_static if c[3] == "color_blob"]
+        yolo_candidates = [c for c in non_static if c[3] == "yolo"]
+
+        if yolo_candidates:
+            best_yolo = max(yolo_candidates, key=lambda c: c[2])
+            if best_yolo[2] >= 0.60:  # high-confidence YOLO wins
+                return (best_yolo[0], best_yolo[1], best_yolo[2], "yolo")
+
         if color_blob_candidates:
             best = max(color_blob_candidates, key=lambda c: c[2])
-            return (best[0], best[1], 0.5, "color_blob")
-        best = max(non_static, key=lambda c: c[2])
-        return (best[0], best[1], best[2], "yolo")
+            return (best[0], best[1], best[2], "color_blob")
+
+        if yolo_candidates:
+            best = max(yolo_candidates, key=lambda c: c[2])
+            return (best[0], best[1], best[2], "yolo")
+
+        return None
 
     def _detect_ball_yolo(self, cv_frame) -> Optional[List[float]]:
         det = self._detect_ball_yolo_with_conf(cv_frame)
@@ -428,6 +456,13 @@ class CricketObjectTracker:
         frames: List[Dict[str, Any]],
         video_path: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        # Reset static-object tracking state for every new video/sequence so
+        # objects from a previous clip don't pollute the current one.
+        self._color_blob_history.clear()
+        self._color_blob_consec.clear()
+        self._last_frame_positions = set()
+        self._static_positions = set()
+
         results: List[Dict[str, Any]] = []
 
         use_yolo = (
