@@ -706,7 +706,7 @@ def _draw_ball_overlay(frame, i: int, det: dict, trail: List[Any], cfg) -> None:
     h, w = frame.shape[:2]
     scale = max(0.6, min(h, w) / 700.0)
 
-    # --- smooth curved motion trail (arc) like broadcast ball-path graphics ---
+    # --- thick smooth broadcast-style red arc trail ---
     trail.append((i, np.array(pos, dtype=np.float32)))
     max_len = int(cfg.get("ball_trail_len", 15))
     gap = int(cfg.get("ball_trail_gap", 30))
@@ -715,14 +715,15 @@ def _draw_ball_overlay(frame, i: int, det: dict, trail: List[Any], cfg) -> None:
     while len(trail) > max_len:
         trail.pop(0)
     m = len(trail)
-    # Draw connected line segments for a smooth arc; older = thinner + dimmer
+    # Draw each segment thick, newest brightest/thickest — broadcast ball-path look
+    base_thick = max(6, int(round(12 * scale)))
     for k in range(1, m):
-        fi_a, p_a = trail[k - 1]
-        fi_b, p_b = trail[k]
-        a = k / m                      # 0 = oldest (faintest), 1 = newest (brightest)
-        # Heavy dark red arc — BGR (0,0,255) pure red, scaled by age
-        color = (0, 0, int(220 * a))
-        thickness = max(2, int(round(4.0 * a * scale)))
+        p_a = trail[k - 1][1]
+        p_b = trail[k][1]
+        a = k / m                      # 0 = oldest, 1 = newest
+        # Bright red (BGR: 0,0,255), scaled by age for fade effect
+        color = (0, 0, int(235 * a))
+        thickness = max(4, int(round(base_thick * a * 0.7 + base_thick * 0.3)))
         cv2.line(frame, (int(p_a[0]), int(p_a[1])),
                  (int(p_b[0]), int(p_b[1])), color, thickness, cv2.LINE_AA)
 
