@@ -225,12 +225,15 @@ class CricketObjectTracker:
         self._color_blob_consec: Dict[Tuple[int, int], int] = {}    # consecutive count per position
         self._last_frame_positions: set = set()                     # positions seen in previous frame
         self._static_positions: set = set()
-        self._STATIC_CUMULATIVE = 5      # seen in 5+ frames total -> static (tighter)
-        self._STATIC_CONSEC_FRAMES = 3   # seen in 3+ consecutive frames -> static (tighter)
-        self._STATIC_POS_TOL = 12        # px tolerance for position match (tighter)
+        self._STATIC_CUMULATIVE = 3      # seen in 3+ frames total -> static (catches flickering floor objects)
+        self._STATIC_CONSEC_FRAMES = 2   # seen in 2+ consecutive frames -> static (catches flickering floor objects)
+        self._STATIC_POS_TOL = 14        # px tolerance for position match (allows slight camera shake)
         self._COLOR_BLOB_MIN_AREA_RATIO = 0.0003  # 0.03% of frame (tighter — fewer noise blobs)
         self._COLOR_BLOB_MAX_AREA_RATIO = 0.002   # 0.2% of frame (tighter — reject large objects)
         self._COLOR_BLOB_MIN_CIRCULARITY = 0.72   # stricter circularity (cricket ball is very round)
+        # YOLO box size limit: cricket balls are small, reject detections whose
+        # box covers more than 3% of the frame (e.g. large round floor objects)
+        self._YOLO_MAX_BOX_AREA_RATIO = 0.03
 
     def _init_detector(self):
         if not self.model_path or not Path(self.model_path).exists():
@@ -247,33 +250,59 @@ class CricketObjectTracker:
         tol = self._STATIC_POS_TOL
         return (int(round(cx / tol)) * tol, int(round(cy / tol)) * tol)
 
+    def _near_pos(self, q1: Tuple[int, int], q2: Tuple[int, int]) -> bool:
+        """True if two quantised positions are within STATIC_POS_TOL px of each other."""
+        return (abs(q1[0] - q2[0]) <= self._STATIC_POS_TOL and
+                abs(q1[1] - q2[1]) <= self._STATIC_POS_TOL)
+
     def _update_static_tracking(self, blobs: List[Tuple[float, float, float]]) -> set:
         """Given candidate blobs, return the set of positions classed as static.
 
         A position is static when it meets EITHER threshold:
         - seen in _STATIC_CUMULATIVE frames total (catches kettles detected intermittently)
         - seen in _STATIC_CONSEC_FRAMES consecutive frames (catches steadily detected objects)
-        A real cricket ball moves constantly so it rarely occupies one quantised
-        pixel for 5+ consecutive frames or 8+ frames total.
+        A real cricket ball moves constantly so it rarely stays within STATIC_POS_TOL
+        px for 2+ consecutive frames or 3+ frames total.
+        Uses proximity matching so a flickering floor object that shifts a few px
+        between frames is still classed as static.
         """
         current: set = set()
         for cx, cy, _conf in blobs:
             q = self._quantize_pos(cx, cy)
             current.add(q)
+
+            # --- proximity match against existing static positions ---
+            near_static = any(self._near_pos(q, sq) for sq in self._static_positions)
+            if near_static:
+                self._static_positions.add(q)
+                # also bump cumulative/history for this quantised cell
+                self._color_blob_history[q] = self._color_blob_history.get(q, 0) + 1
+                continue
+
             # Cumulative count
             self._color_blob_history[q] = self._color_blob_history.get(q, 0) + 1
-            # Consecutive count
-            if q in self._last_frame_positions:
-                self._color_blob_consec[q] = self._color_blob_consec.get(q, 0) + 1
+
+            # Consecutive count: match against any position seen last frame within tolerance
+            near_last = None
+            for lq in self._last_frame_positions:
+                if self._near_pos(q, lq):
+                    near_last = lq
+                    break
+            if near_last is not None:
+                self._color_blob_consec[near_last] = self._color_blob_consec.get(near_last, 0) + 1
+                consec_q = near_last
             else:
                 self._color_blob_consec[q] = 1
+                consec_q = q
+
             # Promote to static if either threshold is met
             if (self._color_blob_history[q] >= self._STATIC_CUMULATIVE or
-                    self._color_blob_consec[q] >= self._STATIC_CONSEC_FRAMES):
+                    self._color_blob_consec.get(consec_q, 0) >= self._STATIC_CONSEC_FRAMES):
                 self._static_positions.add(q)
+
         # Positions not seen this frame reset their consecutive count
         for q in list(self._color_blob_consec.keys()):
-            if q not in current:
+            if not any(self._near_pos(q, cq) for cq in current):
                 self._color_blob_consec[q] = 0
         self._last_frame_positions = current
         return self._static_positions
@@ -357,12 +386,17 @@ class CricketObjectTracker:
         if self.yolo_model is not None:
             try:
                 res = self.yolo_model(cv_frame, verbose=False)[0]
+                h, w = cv_frame.shape[:2]
+                max_box_area = (w * h) * self._YOLO_MAX_BOX_AREA_RATIO
                 for box in res.boxes:
                     cls_name = res.names.get(int(box.cls[0]), "")
                     if "ball" in cls_name.lower():
                         xyxy = box.xyxy[0].tolist()
                         bw = xyxy[2] - xyxy[0]
                         bh = xyxy[3] - xyxy[1]
+                        # Reject boxes that are too large to be a cricket ball
+                        if bw * bh > max_box_area:
+                            continue
                         # Reject detections with very poor aspect ratio
                         aspect = min(bw, bh) / max(bw, bh) if max(bw, bh) > 0 else 0
                         if aspect < 0.4:

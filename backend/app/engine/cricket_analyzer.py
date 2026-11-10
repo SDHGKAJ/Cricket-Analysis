@@ -797,6 +797,38 @@ def _ball_plausible(det, cfg) -> Tuple[bool, str]:
     return True, ""
 
 
+def _reject_floor_stationary(det, cfg) -> Tuple[bool, str]:
+    """Reject ball detections that sit on the floor and barely move.
+
+    A real cricket ball in play is either airborne or moving across the pitch.
+    A stationary round object on the floor (plate, lid, kettle base) that gets
+    repeatedly detected as a "ball" will:
+      - sit in the bottom portion of the frame (floor level)
+      - have near-zero position variance across all frames
+      - have enough detections to pass the plausibility gate
+
+    Returns (rejected, reason). If rejected, callers should clear det["balls"].
+    """
+    idx = [i for i, b in enumerate(det["balls"]) if b is not None]
+    if len(idx) < cfg["ball_min_dets"]:
+        return False, ""
+    h = det["height"]
+    floor_y = 0.70 * h  # bottom 30% of frame = floor level
+    floor_dets = [i for i in idx if det["balls"][i][1] >= floor_y]
+    if len(floor_dets) < max(3, len(idx) * 0.6):
+        # fewer than 60% of detections are floor-level — not a floor object
+        return False, ""
+    # Check position variance: a stationary object has tiny spread
+    pts = np.array([det["balls"][i] for i in floor_dets], dtype=np.float32)
+    spread_x = float(pts[:, 0].max() - pts[:, 0].min())
+    spread_y = float(pts[:, 1].max() - pts[:, 1].min())
+    max_spread = max(spread_x, spread_y)
+    if max_spread > 15.0:  # moves more than 15px — probably a real ball near the ground
+        return False, ""
+    return True, (f"floor-level stationary object rejected "
+                  f"(spread {max_spread:.0f}px, {len(floor_dets)}/{len(idx)} detections on floor)")
+
+
 def _ball_contact_metric(det, cfg) -> Tuple[Optional[int], Dict[str, Any]]:
     # primary: smallest ball <-> bat-tip distance (ball must be moving — a
     # static false positive locked onto the scene is rejected)
@@ -1367,6 +1399,13 @@ def analyze_cricket_shot(
     if not plausible:
         det["balls"] = [None] * det["n"]
         det["ball_note"] = gate_note or why
+
+    # 1d) floor-level stationary rejection — safety net for round floor objects
+    #     (plate, lid, kettle base) that pass static rejection in the tracker
+    floor_rej, floor_why = _reject_floor_stationary(det, cfg)
+    if floor_rej:
+        det["balls"] = [None] * det["n"]
+        det["ball_note"] = gate_note or floor_why
 
     # 1b) front foot: planted (lower) foot if one is clearly airborne
     feet = _choose_front_foot(det, batter_hand, cfg)
