@@ -61,6 +61,7 @@ export interface ShotAnalysis {
   cricket_video_url?: string;
   cricket_report_url?: string;
   feedback?: string[];
+  ball_tracking?: BallTrackingReport;
   confidence?: number;
   delta_last_session?: number;
   frames?: FrameLandmarks[];

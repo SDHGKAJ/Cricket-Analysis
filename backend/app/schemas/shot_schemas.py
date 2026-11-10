@@ -30,6 +30,7 @@ class ShotAnalysisResponse(BaseModel):
     cricket_video_url: Optional[str] = None
     cricket_report_url: Optional[str] = None
     feedback: List[str] = []
+    ball_tracking: Optional[Dict[str, Any]] = None
     frames: List[FrameLandmarks] = []
 
 class LandmarkPoint(BaseModel):

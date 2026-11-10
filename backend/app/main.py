@@ -364,6 +364,7 @@ async def analyze_video_upload(
         result.cricket_video_url = f"/outputs/{cricket_out.name}"
         result.cricket_report_url = f"/outputs/{cricket_out.stem}.json"
         result.feedback = report.get("feedback", [])
+        result.ball_tracking = report.get("ball_tracking")
     except Exception:
         pass  # cricket analysis is best-effort; rest of the result is still returned
 

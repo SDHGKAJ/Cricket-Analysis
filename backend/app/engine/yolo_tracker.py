@@ -216,6 +216,21 @@ class CricketObjectTracker:
         self.yolo_model = None
         self.ball_tracker = CricketBallTracker(model_path=model_path)
         self._init_detector()
+        # Static-object rejection for the colour-blob detector: a kettle on the
+        # floor or a yellow wall object stays at (near-)identical pixels across
+        # frames, whereas a real cricket ball moves. We track both cumulative
+        # frame count and consecutive frames at the same quantised position; a
+        # position is classed as static if EITHER threshold is met.
+        self._color_blob_history: Dict[Tuple[int, int], int] = {}   # cumulative count per position
+        self._color_blob_consec: Dict[Tuple[int, int], int] = {}    # consecutive count per position
+        self._last_frame_positions: set = set()                     # positions seen in previous frame
+        self._static_positions: set = set()
+        self._STATIC_CUMULATIVE = 8      # seen in 8+ frames total -> static
+        self._STATIC_CONSEC_FRAMES = 5   # seen in 5+ consecutive frames -> static
+        self._STATIC_POS_TOL = 16        # px tolerance for position match
+        self._COLOR_BLOB_MIN_AREA_RATIO = 0.0002  # 0.02% of frame (tiny noise out)
+        self._COLOR_BLOB_MAX_AREA_RATIO = 0.004   # 0.4% of frame (kettle-scale out)
+        self._COLOR_BLOB_MIN_CIRCULARITY = 0.6
 
     def _init_detector(self):
         if not self.model_path or not Path(self.model_path).exists():
@@ -227,41 +242,138 @@ class CricketObjectTracker:
         except Exception:
             self.yolo_model = None
 
+    def _quantize_pos(self, cx: float, cy: float) -> Tuple[int, int]:
+        """Snap a position to a coarse grid so small jitter still matches."""
+        tol = self._STATIC_POS_TOL
+        return (int(round(cx / tol)) * tol, int(round(cy / tol)) * tol)
+
+    def _update_static_tracking(self, blobs: List[Tuple[float, float, float]]) -> set:
+        """Given candidate blobs, return the set of positions classed as static.
+
+        A position is static when it meets EITHER threshold:
+        - seen in _STATIC_CUMULATIVE frames total (catches kettles detected intermittently)
+        - seen in _STATIC_CONSEC_FRAMES consecutive frames (catches steadily detected objects)
+        A real cricket ball moves constantly so it rarely occupies one quantised
+        pixel for 5+ consecutive frames or 8+ frames total.
+        """
+        current: set = set()
+        for cx, cy, _conf in blobs:
+            q = self._quantize_pos(cx, cy)
+            current.add(q)
+            # Cumulative count
+            self._color_blob_history[q] = self._color_blob_history.get(q, 0) + 1
+            # Consecutive count
+            if q in self._last_frame_positions:
+                self._color_blob_consec[q] = self._color_blob_consec.get(q, 0) + 1
+            else:
+                self._color_blob_consec[q] = 1
+            # Promote to static if either threshold is met
+            if (self._color_blob_history[q] >= self._STATIC_CUMULATIVE or
+                    self._color_blob_consec[q] >= self._STATIC_CONSEC_FRAMES):
+                self._static_positions.add(q)
+        # Positions not seen this frame reset their consecutive count
+        for q in list(self._color_blob_consec.keys()):
+            if q not in current:
+                self._color_blob_consec[q] = 0
+        self._last_frame_positions = current
+        return self._static_positions
+
+    def _is_static_position(self, cx: float, cy: float) -> bool:
+        q = self._quantize_pos(cx, cy)
+        if q in self._static_positions:
+            return True
+        for sq in self._static_positions:
+            if abs(sq[0] - q[0]) <= self._STATIC_POS_TOL and abs(sq[1] - q[1]) <= self._STATIC_POS_TOL:
+                return True
+        return False
+
     def _detect_ball_yolo_with_conf(self, cv_frame) -> Optional[Tuple[float, float, float]]:
         import cv2
         import numpy as np
 
-        # Color-blob first: colour-specific to an orange/red cricket ball, so it is
-        # more reliable than the weak (3-image) custom YOLO model, which produces
-        # wall-object false positives instead of returning None. YOLO is only a
-        # fallback for non-orange balls or poor lighting.
-        blob = self._detect_ball_color_blob(cv_frame)
-        if blob is not None:
-            return (blob[0], blob[1], 0.5, "color_blob")
+        # Gather ALL candidate positions from both detectors so static-object
+        # tracking learns from every detector, not just colour-blob. A kettle on
+        # the floor or a yellow wall object stays at the same pixels across
+        # frames; a real cricket ball moves. Positions seen for
+        # _STATIC_CONSEC_FRAMES consecutive frames are classed as static and
+        # rejected by both detectors.
+        candidates: List[Tuple[float, float, float]] = []  # (cx, cy, conf)
 
-        # YOLO fallback
-        if self.yolo_model is None:
-            return None
+        # --- Colour-blob candidates ---
         try:
-            res = self.yolo_model(cv_frame, verbose=False)[0]
-            best: Optional[Tuple[float, float, float, str]] = None
-            for box in res.boxes:
-                cls_name = res.names.get(int(box.cls[0]), "")
-                if "ball" in cls_name.lower():
-                    xyxy = box.xyxy[0].tolist()
-                    conf = float(box.conf[0])
-                    if best is None or conf > best[2]:
-                        best = (
-                            (xyxy[0] + xyxy[2]) / 2.0,
-                            (xyxy[1] + xyxy[3]) / 2.0,
-                            conf,
-                            "yolo",
-                        )
-            if best is not None:
-                return best
+            hsv = cv2.cvtColor(cv_frame, cv2.COLOR_BGR2HSV)
+            lower_orange = np.array([5, 100, 100])
+            upper_orange = np.array([25, 255, 255])
+            lower_red1 = np.array([0, 100, 100])
+            upper_red1 = np.array([10, 255, 255])
+            lower_red2 = np.array([170, 100, 100])
+            upper_red2 = np.array([180, 255, 255])
+            mask = cv2.bitwise_or(
+                cv2.bitwise_or(
+                    cv2.inRange(hsv, lower_orange, upper_orange),
+                    cv2.inRange(hsv, lower_red1, upper_red1),
+                ),
+                cv2.inRange(hsv, lower_red2, upper_red2),
+            )
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            h, w = cv_frame.shape[:2]
+            min_area = (w * h) * self._COLOR_BLOB_MIN_AREA_RATIO
+            max_area = (w * h) * self._COLOR_BLOB_MAX_AREA_RATIO
+            for cnt in contours:
+                area = cv2.contourArea(cnt)
+                if area < min_area or area > max_area:
+                    continue
+                perimeter = cv2.arcLength(cnt, True)
+                if perimeter == 0:
+                    continue
+                circularity = 4 * np.pi * area / (perimeter * perimeter)
+                if circularity < self._COLOR_BLOB_MIN_CIRCULARITY:
+                    continue
+                M = cv2.moments(cnt)
+                if M["m00"] == 0:
+                    continue
+                cx = M["m10"] / M["m00"]
+                cy = M["m01"] / M["m00"]
+                conf = min(0.85, circularity * 0.6 + 0.25)
+                candidates.append((cx, cy, conf))
         except Exception:
             pass
-        return None
+
+        # --- YOLO candidates ---
+        if self.yolo_model is not None:
+            try:
+                res = self.yolo_model(cv_frame, verbose=False)[0]
+                for box in res.boxes:
+                    cls_name = res.names.get(int(box.cls[0]), "")
+                    if "ball" in cls_name.lower():
+                        xyxy = box.xyxy[0].tolist()
+                        cx = (xyxy[0] + xyxy[2]) / 2.0
+                        cy = (xyxy[1] + xyxy[3]) / 2.0
+                        conf = float(box.conf[0])
+                        candidates.append((cx, cy, conf))
+            except Exception:
+                pass
+
+        # Update static tracking with every candidate from both detectors
+        self._update_static_tracking(candidates)
+
+        # Filter to non-static positions only
+        non_static = [c for c in candidates if not self._is_static_position(c[0], c[1])]
+
+        if not non_static:
+            return None
+
+        # Prefer colour-blob (cricket-ball colour, conf 0.5 floor) over YOLO;
+        # otherwise pick the highest confidence detection.
+        color_blob_candidates = [c for c in non_static if c[2] <= 0.85]
+        if color_blob_candidates:
+            best = max(color_blob_candidates, key=lambda c: c[2])
+            return (best[0], best[1], 0.5, "color_blob")
+        best = max(non_static, key=lambda c: c[2])
+        return (best[0], best[1], best[2], "yolo")
 
     def _detect_ball_yolo(self, cv_frame) -> Optional[List[float]]:
         det = self._detect_ball_yolo_with_conf(cv_frame)
@@ -272,64 +384,13 @@ class CricketObjectTracker:
 
         Used when YOLO misses the ball (weak model trained on few images).
         Looks for orange/red circular blobs in HSV color space, filters by
-        area and circularity, returns normalized [x, y] in 0..1.
+        tighter area/circularity, rejects static objects (kettle, wall items)
+        that persist at the same pixels across frames, returns [x, y] in pixels.
         """
-        import cv2
-        import numpy as np
-
-        try:
-            hsv = cv2.cvtColor(cv_frame, cv2.COLOR_BGR2HSV)
-
-            # Orange ball: hue ~10-25; red wraps at 0/180
-            lower_orange = np.array([5, 100, 100])
-            upper_orange = np.array([25, 255, 255])
-            lower_red1 = np.array([0, 100, 100])
-            upper_red1 = np.array([10, 255, 255])
-            lower_red2 = np.array([170, 100, 100])
-            upper_red2 = np.array([180, 255, 255])
-
-            mask = cv2.bitwise_or(
-                cv2.bitwise_or(
-                    cv2.inRange(hsv, lower_orange, upper_orange),
-                    cv2.inRange(hsv, lower_red1, upper_red1),
-                ),
-                cv2.inRange(hsv, lower_red2, upper_red2),
-            )
-
-            # Clean up noise
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-            h, w = cv_frame.shape[:2]
-            min_area = (w * h) * 0.0001  # 0.01% of frame
-            max_area = (w * h) * 0.01     # 1% of frame
-
-            best: Optional[Tuple[float, float, float]] = None
-            for cnt in contours:
-                area = cv2.contourArea(cnt)
-                if area < min_area or area > max_area:
-                    continue
-                perimeter = cv2.arcLength(cnt, True)
-                if perimeter == 0:
-                    continue
-                circularity = 4 * np.pi * area / (perimeter * perimeter)
-                if circularity < 0.5:
-                    continue
-                M = cv2.moments(cnt)
-                if M["m00"] == 0:
-                    continue
-                cx = M["m10"] / M["m00"]
-                cy = M["m01"] / M["m00"]
-                conf = min(0.85, circularity * 0.6 + 0.25)
-                if best is None or conf > best[2]:
-                    best = (cx, cy, conf)  # pixel coords, consistent with the YOLO path
-
-            return [best[0], best[1]] if best is not None else None
-        except Exception:
-            return None
+        det = self._detect_ball_yolo_with_conf(cv_frame)
+        if det is not None and det[3] == "color_blob":
+            return [det[0], det[1]]
+        return None
 
     @staticmethod
     def _kinematic_bat_proxy(
