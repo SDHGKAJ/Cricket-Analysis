@@ -67,13 +67,13 @@ CONFIG: Dict[str, Any] = {
     "traj_min_speed_px": 4.0,       # ignore slower-than-this ball motion for turns
     "traj_min_approach": 3,         # ball detections required before a turn contact
     "traj_body_dist_ratio": 0.35,   # ball must be within this*min(w,h) of bat/body at turn
-    "ball_min_dets": 6,             # min detections before a ball track can be trusted
+    "ball_min_dets": 4,             # min detections before a ball track can be trusted (lowered from 6)
     "ball_max_curv_ratio": 0.06,    # median 2nd-diff of track <= this*min(w,h) (smoothness)
     "ball_teleport_ratio": 0.20,    # consecutive jump > ratio*min(w,h) counts as a teleport (tighter)
     "ball_max_teleports": 3,        # more teleports than this = cluster-hopping false positive (tighter)
     # -- ball tracking: visibility & verification ---------------------------
-    "ball_conf_min": 0.35,          # BALL_CONF_MIN: raised from 0.25 to filter more false positives
-    "ball_max_jump_ratio": 0.18,    # BALL_MAX_JUMP_PX = tighter ratio to reject erratic jumps
+    "ball_conf_min": 0.30,          # BALL_CONF_MIN: balance between catching ball and filtering noise
+    "ball_max_jump_ratio": 0.22,    # BALL_MAX_JUMP_PX = allow faster ball movement (was 0.18)
     "ball_min_frames": 5,           # MIN_BALL_FRAMES: below this -> status "not detected"
     "ball_trail_len": 15,           # fading trail length on the output video
     "ball_trail_gap": 30,           # restart the trail after this many frames without ball
@@ -626,10 +626,17 @@ def _filter_ball_detections(det, cfg) -> Dict[str, int]:
             kept_source.append(None)
             continue
 
-        # 2) jump gate — too far from previous kept position within 3 frames
-        if (last_p is not None and last_i is not None and (i - last_i) <= 3
-                and float(np.hypot(*(raw - last_p))) > jump_px):
+        # 2) jump gate — too far from previous detected position within 3 frames.
+        #    Update last_p to this raw position regardless of accept/reject so
+        #    nearby frames can chain into a track. On a jump rejection, reset
+        #    last_p so a subsequent real-ball detection can start a new track
+        #    instead of being blocked by a stale wall-object position.
+        prev_i, prev_p = last_i, last_p
+        last_i, last_p = i, raw
+        if (prev_p is not None and prev_i is not None and (i - prev_i) <= 3
+                and float(np.hypot(*(raw - prev_p))) > jump_px):
             rejected["jump"] += 1
+            last_i, last_p = None, None   # reset — start a new track
             kept.append(None)
             kept_conf.append(None)
             kept_source.append(None)
@@ -653,7 +660,6 @@ def _filter_ball_detections(det, cfg) -> Dict[str, int]:
         kept.append(np.array(raw, dtype=np.float32))
         kept_conf.append(float(rc) if rc is not None else None)
         kept_source.append(rs)
-        last_i, last_p = i, raw
 
     det["balls"] = kept
     det["ball_conf"] = kept_conf
