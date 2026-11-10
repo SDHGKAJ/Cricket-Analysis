@@ -706,7 +706,7 @@ def _draw_ball_overlay(frame, i: int, det: dict, trail: List[Any], cfg) -> None:
     h, w = frame.shape[:2]
     scale = max(0.6, min(h, w) / 700.0)
 
-    # --- fading trail of the last N ball positions ---
+    # --- smooth curved motion trail (arc) like broadcast ball-path graphics ---
     trail.append((i, np.array(pos, dtype=np.float32)))
     max_len = int(cfg.get("ball_trail_len", 15))
     gap = int(cfg.get("ball_trail_gap", 30))
@@ -715,12 +715,16 @@ def _draw_ball_overlay(frame, i: int, det: dict, trail: List[Any], cfg) -> None:
     while len(trail) > max_len:
         trail.pop(0)
     m = len(trail)
-    for k, (fi, p) in enumerate(trail):
-        a = (k + 1) / m                # oldest = faintest
-        r = int(round((2.0 + 3.0 * a) * scale))
-        color = (0, int(210 * a), int(255 * a))   # orange fading out
-        cv2.circle(frame, (int(p[0]), int(p[1])), r, color,
-                   max(1, int(round(a * 2))), cv2.LINE_AA)
+    # Draw connected line segments for a smooth arc; older = thinner + dimmer
+    for k in range(1, m):
+        fi_a, p_a = trail[k - 1]
+        fi_b, p_b = trail[k]
+        a = k / m                      # 0 = oldest (faintest), 1 = newest (brightest)
+        thickness = max(1, int(round(2.5 * a * scale)))
+        # Bright cyan arc (BGR) — distinct from skeleton/pose colours
+        color = (int(255 * a), int(220 * a), int(60 * a))
+        cv2.line(frame, (int(p_a[0]), int(p_a[1])),
+                 (int(p_b[0]), int(p_b[1])), color, thickness, cv2.LINE_AA)
 
     # --- current detection: circle + confidence label ---
     cx, cy = int(pos[0]), int(pos[1])
