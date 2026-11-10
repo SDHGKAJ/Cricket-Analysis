@@ -159,8 +159,9 @@ def _detect_pass(input_path: str) -> Dict[str, Any]:
     mp_xy: List[Optional[np.ndarray]] = []      # (33, 2) px
     mp_vis: List[Optional[np.ndarray]] = []     # (33,)
     coco: List[Optional[np.ndarray]] = []       # (18, 3) smoothed px+conf
-    ball_raw: List[Optional[np.ndarray]] = []   # (2,) px — raw YOLO, pre-filter
-    ball_raw_conf: List[Optional[float]] = []   # YOLO confidence (0-1)
+    ball_raw: List[Optional[np.ndarray]] = []   # (2,) px — raw detection, pre-filter
+    ball_raw_conf: List[Optional[float]] = []   # detection confidence (0-1)
+    ball_raw_source: List[Optional[str]] = []   # "color_blob" | "yolo"
     tips: List[Optional[np.ndarray]] = []       # (2,) px
 
     smoothed: Optional[np.ndarray] = None
@@ -197,9 +198,11 @@ def _detect_pass(input_path: str) -> Dict[str, Any]:
                 if ball is not None:
                     ball_raw.append(np.array([ball[0], ball[1]], dtype=np.float32))
                     ball_raw_conf.append(float(ball[2]))
+                    ball_raw_source.append(ball[3] if len(ball) > 3 else "yolo")
                 else:
                     ball_raw.append(None)
                     ball_raw_conf.append(None)
+                    ball_raw_source.append(None)
             else:
                 mp_xy.append(None)
                 mp_vis.append(None)
@@ -222,6 +225,7 @@ def _detect_pass(input_path: str) -> Dict[str, Any]:
         # raw (unfiltered) detections + a pre-filtered copy for downstream use;
         # _filter_ball_detections() replaces "balls" with the kept positions
         "ball_raw": ball_raw, "ball_raw_conf": ball_raw_conf,
+        "ball_raw_source": ball_raw_source,
         "balls": list(ball_raw), "ball_conf": list(ball_raw_conf),
         "tips": tips, "n": idx,
     }
@@ -564,20 +568,24 @@ def _body_box(det, i: int, margin: float):
 
 
 def _filter_ball_detections(det, cfg) -> Dict[str, int]:
-    """Filter raw YOLO ball detections.
+    """Filter raw ball detections.
 
     Gates (all thresholds in CONFIG):
       1. BALL_CONF_MIN      — drop detections below this confidence
       2. BALL_MAX_JUMP_PX   — drop a detection that jumps more than
                               0.25 * frame width from the previous kept
                               position within 3 frames
-      3. body box           — drop detections inside the batter's body box
+      3. body box           — drop YOLO detections inside the batter's body box
                               unless the ball is near the bat (shoes,
-                              bottles, shadows)
+                              bottles, shadows). Color-blob detections are
+                              colour-specific to an orange/red cricket ball, so
+                              they are trusted even inside the body box
+                              (e.g. ball on the floor near the feet).
 
     Overwrites det["balls"] with the kept positions and stores per-frame
-    confidence in det["ball_conf"]. Raw detections stay in det["ball_raw"]
-    / det["ball_raw_conf"] for stats and the debug video.
+    confidence in det["ball_conf"] and source in det["ball_source"].
+    Raw detections stay in det["ball_raw"] / det["ball_raw_conf"] /
+    det["ball_raw_source"] for stats and the debug video.
     Returns rejection counts.
     """
     w = det["width"]
@@ -585,9 +593,11 @@ def _filter_ball_detections(det, cfg) -> Dict[str, int]:
     jump_px = cfg["ball_max_jump_ratio"] * w            # BALL_MAX_JUMP_PX
     near_bat_px = cfg["ball_near_bat_ratio"] * min(det["width"], det["height"])
     margin = cfg["ball_body_margin"]
+    raw_sources = det.get("ball_raw_source") or [None] * det["n"]
 
     kept: List[Optional[np.ndarray]] = []
     kept_conf: List[Optional[float]] = []
+    kept_source: List[Optional[str]] = []
     rejected = {"low_conf": 0, "jump": 0, "body_box": 0}
     last_i: Optional[int] = None
     last_p: Optional[np.ndarray] = None
@@ -595,9 +605,11 @@ def _filter_ball_detections(det, cfg) -> Dict[str, int]:
     for i in range(det["n"]):
         raw = det["ball_raw"][i] if i < len(det["ball_raw"]) else None
         rc = det["ball_raw_conf"][i] if i < len(det["ball_raw_conf"]) else None
+        rs = raw_sources[i] if i < len(raw_sources) else None
         if raw is None:
             kept.append(None)
             kept_conf.append(None)
+            kept_source.append(None)
             continue
 
         # 1) confidence gate
@@ -605,6 +617,7 @@ def _filter_ball_detections(det, cfg) -> Dict[str, int]:
             rejected["low_conf"] += 1
             kept.append(None)
             kept_conf.append(None)
+            kept_source.append(None)
             continue
 
         # 2) jump gate — too far from previous kept position within 3 frames
@@ -613,25 +626,32 @@ def _filter_ball_detections(det, cfg) -> Dict[str, int]:
             rejected["jump"] += 1
             kept.append(None)
             kept_conf.append(None)
+            kept_source.append(None)
             continue
 
-        # 3) body-box gate — inside the batter box only if near the bat
+        # 3) body-box gate — skip for colour-blob detections (trustworthy
+        #    orange/red ball); YOLO detections inside the body box only kept
+        #    if near the bat.
         box = _body_box(det, i, margin)
         if box is not None and box[0] <= raw[0] <= box[2] and box[1] <= raw[1] <= box[3]:
-            tip = det["tips"][i] if i < len(det["tips"]) else None
-            near_bat = tip is not None and float(np.hypot(*(raw - tip))) <= near_bat_px
-            if not near_bat:
-                rejected["body_box"] += 1
-                kept.append(None)
-                kept_conf.append(None)
-                continue
+            if rs != "color_blob":
+                tip = det["tips"][i] if i < len(det["tips"]) else None
+                near_bat = tip is not None and float(np.hypot(*(raw - tip))) <= near_bat_px
+                if not near_bat:
+                    rejected["body_box"] += 1
+                    kept.append(None)
+                    kept_conf.append(None)
+                    kept_source.append(None)
+                    continue
 
         kept.append(np.array(raw, dtype=np.float32))
         kept_conf.append(float(rc) if rc is not None else None)
+        kept_source.append(rs)
         last_i, last_p = i, raw
 
     det["balls"] = kept
     det["ball_conf"] = kept_conf
+    det["ball_source"] = kept_source
     return rejected
 
 
@@ -1327,12 +1347,11 @@ def analyze_cricket_shot(
           f"status={ball_tracking['status']}, "
           f"rejected={ball_tracking['rejected']}")
 
-    # 1c) ball-track plausibility — evaluated on the RAW YOLO track (its
-    #     original behaviour): a cluster-hopping raw track means the
-    #     detections themselves are false positives (shadow practice, wall
-    #     objects), no matter how clean the per-detection filters left them.
-    #     On failure no metric may use the ball.
-    plausible, why = _ball_plausible({**det, "balls": det["ball_raw"]}, cfg)
+    # 1c) ball-track plausibility — evaluated on the FILTERED track (post
+    #     _filter_ball_detections): the per-detection filters (conf/jump/
+    #     body-box) already remove erratic FPs, so a coherent kept track
+    #     means real ball detections. On failure no metric may use the ball.
+    plausible, why = _ball_plausible(det, cfg)
     if not plausible:
         det["balls"] = [None] * det["n"]
         det["ball_note"] = gate_note or why

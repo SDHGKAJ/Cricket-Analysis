@@ -228,11 +228,23 @@ class CricketObjectTracker:
             self.yolo_model = None
 
     def _detect_ball_yolo_with_conf(self, cv_frame) -> Optional[Tuple[float, float, float]]:
+        import cv2
+        import numpy as np
+
+        # Color-blob first: colour-specific to an orange/red cricket ball, so it is
+        # more reliable than the weak (3-image) custom YOLO model, which produces
+        # wall-object false positives instead of returning None. YOLO is only a
+        # fallback for non-orange balls or poor lighting.
+        blob = self._detect_ball_color_blob(cv_frame)
+        if blob is not None:
+            return (blob[0], blob[1], 0.5, "color_blob")
+
+        # YOLO fallback
         if self.yolo_model is None:
             return None
         try:
             res = self.yolo_model(cv_frame, verbose=False)[0]
-            best: Optional[Tuple[float, float, float]] = None
+            best: Optional[Tuple[float, float, float, str]] = None
             for box in res.boxes:
                 cls_name = res.names.get(int(box.cls[0]), "")
                 if "ball" in cls_name.lower():
@@ -243,8 +255,10 @@ class CricketObjectTracker:
                             (xyxy[0] + xyxy[2]) / 2.0,
                             (xyxy[1] + xyxy[3]) / 2.0,
                             conf,
+                            "yolo",
                         )
-            return best
+            if best is not None:
+                return best
         except Exception:
             pass
         return None
@@ -252,6 +266,70 @@ class CricketObjectTracker:
     def _detect_ball_yolo(self, cv_frame) -> Optional[List[float]]:
         det = self._detect_ball_yolo_with_conf(cv_frame)
         return [det[0], det[1]] if det is not None else None
+
+    def _detect_ball_color_blob(self, cv_frame) -> Optional[List[float]]:
+        """Detect orange/red cricket ball using HSV color-blob fallback.
+
+        Used when YOLO misses the ball (weak model trained on few images).
+        Looks for orange/red circular blobs in HSV color space, filters by
+        area and circularity, returns normalized [x, y] in 0..1.
+        """
+        import cv2
+        import numpy as np
+
+        try:
+            hsv = cv2.cvtColor(cv_frame, cv2.COLOR_BGR2HSV)
+
+            # Orange ball: hue ~10-25; red wraps at 0/180
+            lower_orange = np.array([5, 100, 100])
+            upper_orange = np.array([25, 255, 255])
+            lower_red1 = np.array([0, 100, 100])
+            upper_red1 = np.array([10, 255, 255])
+            lower_red2 = np.array([170, 100, 100])
+            upper_red2 = np.array([180, 255, 255])
+
+            mask = cv2.bitwise_or(
+                cv2.bitwise_or(
+                    cv2.inRange(hsv, lower_orange, upper_orange),
+                    cv2.inRange(hsv, lower_red1, upper_red1),
+                ),
+                cv2.inRange(hsv, lower_red2, upper_red2),
+            )
+
+            # Clean up noise
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            h, w = cv_frame.shape[:2]
+            min_area = (w * h) * 0.0001  # 0.01% of frame
+            max_area = (w * h) * 0.01     # 1% of frame
+
+            best: Optional[Tuple[float, float, float]] = None
+            for cnt in contours:
+                area = cv2.contourArea(cnt)
+                if area < min_area or area > max_area:
+                    continue
+                perimeter = cv2.arcLength(cnt, True)
+                if perimeter == 0:
+                    continue
+                circularity = 4 * np.pi * area / (perimeter * perimeter)
+                if circularity < 0.5:
+                    continue
+                M = cv2.moments(cnt)
+                if M["m00"] == 0:
+                    continue
+                cx = M["m10"] / M["m00"]
+                cy = M["m01"] / M["m00"]
+                conf = min(0.85, circularity * 0.6 + 0.25)
+                if best is None or conf > best[2]:
+                    best = (cx, cy, conf)  # pixel coords, consistent with the YOLO path
+
+            return [best[0], best[1]] if best is not None else None
+        except Exception:
+            return None
 
     @staticmethod
     def _kinematic_bat_proxy(
@@ -303,14 +381,20 @@ class CricketObjectTracker:
                 import cv2
 
                 cap = cv2.VideoCapture(video_path)
+                y_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1
+                y_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1
                 idx = 0
                 while cap.isOpened():
                     ret, cv_frame = cap.read()
                     if not ret:
                         break
                     ball = self._detect_ball_yolo(cv_frame)
+                    # Fallback: color-blob detection when YOLO misses the ball
+                    if ball is None:
+                        ball = self._detect_ball_color_blob(cv_frame)
                     if ball is not None:
-                        yolo_balls[idx] = ball
+                        # store normalized [0..1] for the FrameLandmarks schema
+                        yolo_balls[idx] = [ball[0] / y_w, ball[1] / y_h]
                     idx += 1
                 cap.release()
             except Exception:
