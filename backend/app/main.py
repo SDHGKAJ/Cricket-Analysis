@@ -35,6 +35,7 @@ from .engine.yolo_tracker import CricketObjectTracker
 from .engine.slowmo_generator import SlowMoReplayGenerator
 from .engine.pose_overlay import analyze_video as analyze_pose_overlay
 from .engine.cricket_analyzer import analyze_cricket_shot
+from .engine.yolo_tracker import CricketBallTracker
 
 # Initialize database tables
 Base.metadata.create_all(bind=engine)
@@ -66,6 +67,7 @@ app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 
 segmenter = ShotSegmentationEngine(fps=30.0)
 object_tracker = CricketObjectTracker()
+ball_tracker = CricketBallTracker()
 replay_generator = SlowMoReplayGenerator(output_dir=str(REPLAY_DIR))
 
 @app.get("/api/health")
@@ -260,6 +262,8 @@ async def analyze_video_upload(
         import cv2
         cap = cv2.VideoCapture(str(saved_path))
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
         frame_idx = 0
 
         # Try mediapipe pose if installed in python, otherwise simulate trajectory proxy
@@ -308,13 +312,17 @@ async def analyze_video_upload(
         frames_data = [{"frame_index": i, "timestamp_ms": i * 33.3, "landmarks": [{"x": 0.5, "y": 0.3, "z": 0.0}] * 33} for i in range(45)]
 
     # Merge YOLOv8n ball detections into frames so downstream analysis can use ball position
-    # ball_pos comes back as [x, y]; schema expects Dict[str, float] {"x": ..., "y": ...}
+    # ball_pos comes back as [x, y] (normalized 0..1); schema expects Dict[str, float] {"x": ..., "y": ...}
+    # Also build pixel-space ball positions for the pose-overlay video drawing.
+    ball_positions: List[Optional[Tuple[float, float, float]]] = [None] * len(frames_data)
     try:
         tracking = object_tracker.track_objects_in_sequence(frames_data, video_path=str(saved_path))
         for i, track in enumerate(tracking):
             if i < len(frames_data) and track.get("ball_pos"):
                 bx, by = track["ball_pos"]
+                conf = float(track.get("conf") or 0.0)
                 frames_data[i]["ball_position"] = {"x": float(bx), "y": float(by)}
+                ball_positions[i] = (bx * width, by * height, conf)
     except Exception:
         pass
 
@@ -341,7 +349,7 @@ async def analyze_video_upload(
     # OpenPose-style skeleton overlay video (original resolution/FPS, H.264)
     try:
         pose_out = OUTPUT_DIR / f"pose_{file_id}.mp4"
-        analyze_pose_overlay(str(saved_path), str(pose_out))
+        analyze_pose_overlay(str(saved_path), str(pose_out), ball_positions=ball_positions)
         result.pose_video_url = f"/outputs/{pose_out.name}"
     except Exception:
         pass  # pose overlay is best-effort; analysis result is still returned
@@ -360,6 +368,112 @@ async def analyze_video_upload(
         pass  # cricket analysis is best-effort; rest of the result is still returned
 
     return result
+
+
+@app.post("/api/detect-ball")
+async def detect_ball_in_video(
+    file: UploadFile = File(...),
+    conf: float = Form(0.15),
+    save_annotated: bool = Form(True),
+):
+    """
+    Detect & track the cricket ball across all frames of an uploaded video
+    using ByteTrack cross-frame tracking (stable ball ID across frames).
+
+    Returns per-frame ball positions with track IDs, plus an optional
+    annotated video saved to /outputs/ and served at /outputs/<name>.
+    """
+    import cv2
+
+    file_id = uuid.uuid4().hex[:8]
+    ext = Path(file.filename or "shot.mp4").suffix or ".mp4"
+    saved_filename = f"ball_{file_id}{ext}"
+    saved_path = UPLOAD_DIR / saved_filename
+
+    contents = await file.read()
+    with open(saved_path, "wb") as f:
+        f.write(contents)
+
+    # Run ByteTrack ball tracking
+    tracks = ball_tracker.track_balls_in_video(str(saved_path), conf=conf)
+
+    # Build per-frame summary (frames with detections only, for compactness)
+    detections = []
+    annotated_path = None
+    for t in tracks:
+        if t.get("ball_pos") is not None:
+            detections.append(
+                {
+                    "frame_index": t["frame_index"],
+                    "ball_id": t["ball_id"],
+                    "ball_pos": t["ball_pos"],       # normalized [x, y] 0..1
+                    "ball_box": t["ball_box"],         # normalized [x1,y1,x2,y2] 0..1
+                    "conf": t["conf"],
+                    "method": t["method"],
+                }
+            )
+
+    # Optionally write an annotated output video with boxes + track IDs
+    if save_annotated and detections:
+        try:
+            annotated_filename = f"ball_annotated_{file_id}.mp4"
+            annotated_path = OUTPUT_DIR / annotated_filename
+
+            cap = cv2.VideoCapture(str(saved_path))
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(str(annotated_path), fourcc, fps, (w, h))
+
+            track_by_frame = {t["frame_index"]: t for t in tracks}
+            fi = 0
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                t = track_by_frame.get(fi)
+                if t and t.get("ball_box") is not None:
+                    x1, y1, x2, y2 = t["ball_box"]
+                    x1i, y1i = int(x1 * w), int(y1 * h)
+                    x2i, y2i = int(x2 * w), int(y2 * h)
+                    cv2.rectangle(frame, (x1i, y1i), (x2i, y2i), (0, 255, 0), 2)
+                    label = f"id:{t['ball_id']} {t['conf']:.2f}"
+                    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                    cv2.rectangle(
+                        frame,
+                        (x1i, y1i - th - 6),
+                        (x1i + tw, y1i),
+                        (0, 255, 0),
+                        -1,
+                    )
+                    cv2.putText(
+                        frame,
+                        label,
+                        (x1i, y1i - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (0, 0, 0),
+                        1,
+                    )
+                    cx, cy = int(((x1 + x2) / 2.0) * w), int(((y1 + y2) / 2.0) * h)
+                    cv2.circle(frame, (cx, cy), 4, (0, 0, 255), -1)
+                writer.write(frame)
+                fi += 1
+            cap.release()
+            writer.release()
+        except Exception:
+            annotated_path = None
+
+    return {
+        "status": "ok",
+        "file_id": file_id,
+        "video_name": file.filename or "shot.mp4",
+        "frames_processed": len(tracks),
+        "ball_detections": detections,
+        "annotated_video_url": f"/outputs/{annotated_path.name}" if annotated_path else None,
+    }
+
 
 @app.websocket("/ws/live-stream")
 async def websocket_live_stream(websocket: WebSocket):

@@ -1,82 +1,111 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { Play, Dumbbell, User as UserIcon } from 'lucide-react';
+import { CameraAngle, BatterHand } from '../types/cricket';
 
-const NAV_ITEMS = [
+const NAV_ITEMS: Array<{ id: 'video' | 'drills'; label: string; icon: React.ElementType }> = [
   { id: 'video', label: 'Video Analysis', icon: Play },
   { id: 'drills', label: 'Drills', icon: Dumbbell },
-] as const;
+];
+
+const CAMERA_ANGLES: CameraAngle[] = ['front_on', 'side_on'];
+const BATTER_HANDS: BatterHand[] = ['right', 'left'];
 
 interface SideNavProps {
-  active: string;
-  onSelect: (id: string) => void;
-  playerName: string;
-  playerId: string;
-  onPlayerChange: () => void;
+  active: 'video' | 'drills';
+  onSelect: (id: 'video' | 'drills') => void;
+  cameraAngle: CameraAngle;
+  onCameraAngleChange: (a: CameraAngle) => void;
+  batterHand: BatterHand;
+  onBatterHandChange: (h: BatterHand) => void;
 }
 
 export const SideNav: React.FC<SideNavProps> = ({
   active,
   onSelect,
-  playerName,
-  playerId,
-  onPlayerChange,
+  cameraAngle,
+  onCameraAngleChange,
+  batterHand,
+  onBatterHandChange,
 }) => {
-  const [menuOpen, setMenuOpen] = useState(false);
-
   return (
     <aside
-      className="fixed left-0 top-0 bottom-0 z-40 w-60 bg-[#0A1020] border-r border-white/6 flex flex-col"
+      className="fixed left-0 top-0 bottom-0 z-20 w-56 bg-[#242833] border-r border-[rgba(255,255,255,0.06)] flex flex-col shrink-0"
       aria-label="Main navigation"
     >
-      {/* ── Brand / player header ── */}
-      <div className="flex items-center gap-2.5 px-4 py-5 border-b border-white/6 shrink-0">
-        <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-emerald-400 via-purple-500 to-sky-400 p-[2px] flex items-center justify-center shadow-lg shadow-purple-500/25">
-          <div className="w-full h-full bg-[#0B1220] rounded-[10px] flex items-center justify-center text-xl">
+      {/* User/app chip at top of sidebar */}
+      <div className="flex items-center gap-2 px-4 py-5 border-b border-[rgba(255,255,255,0.06)] shrink-0">
+        <div className="w-10 h-10 rounded-[10px] bg-gradient-to-br from-[#1FB5D6] to-[#7B7FE0] flex items-center justify-center shadow-lg shadow-[#1FB5D6]/25">
+          <div className="w-full h-full bg-[#2B2F3A] rounded-[8px] flex items-center justify-center text-xl">
             🏏
           </div>
         </div>
         <div className="min-w-0 flex flex-col">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-bold text-white truncate">{playerName}</span>
-            <button
-              onClick={onPlayerChange}
-              className="p-1 rounded-full bg-white/5 hover:bg-white/10 text-white/60 transition-all"
-              title="Change player"
-              aria-label="Change player"
-            >
-              <UserIcon className="w-3 h-3" />
-            </button>
-          </div>
-          <span className="text-[10px] text-slate-500 font-medium font-numeric truncate">
-            {playerId}
-          </span>
+          <div className="text-xs font-bold text-[#FFFFFF] truncate">CricVision Pro</div>
+          <span className="text-[10px] text-[#6E7486] font-numeric truncate">Batter 01</span>
         </div>
       </div>
 
-      {/* ── Navigation ── */}
-      <nav className="flex-1 px-3 py-2 overflow-y-auto">
+      <nav className="flex-1 px-3 py-3 overflow-y-auto">
         {NAV_ITEMS.map((item) => {
-          const isActive = active === item.id;
           const Icon = item.icon;
+          const isActive = active === item.id;
           return (
             <button
               key={item.id}
               onClick={() => onSelect(item.id)}
-              className={`flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-xs font-semibold transition-all ${
+              className={`flex items-center gap-3 px-3 py-2.5 rounded-[10px] text-xs font-semibold transition-colors ${
                 isActive
-                  ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 shadow-lg shadow-emerald-500/10'
-                  : 'text-slate-400 hover:bg-white/5 hover:text-white hover:border-white/10 border-transparent'
+                  ? 'bg-[#3A3F4E] border-l-2 border-[#1FB5D6] text-[#1FB5D6] shadow-lg shadow-[#1FB5D6]/15'
+                  : 'text-[#6E7486] hover:text-[#FFFFFF] hover:bg-[#323744]/60 border-transparent'
               }`}
             >
               <Icon className="w-4.5 h-4.5 shrink-0" />
-              <span className="font-sans">{item.label}</span>
-              {isActive && (
-                <span className="ml-auto w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              )}
+              <span>{item.label}</span>
             </button>
           );
         })}
       </nav>
+
+      {/* Camera angle / handedness toggles */}
+      <div className="p-3 border-t border-[rgba(255,255,255,0.06)] space-y-3">
+        <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-[#6E7486]">
+          <span>Camera angle</span>
+        </div>
+        <div className="flex gap-1">
+          {CAMERA_ANGLES.map((a) => (
+            <button
+              key={a}
+              onClick={() => onCameraAngleChange(a)}
+              className={`flex-1 py-1.5 rounded-[8px] text-[11px] font-semibold border transition-colors ${
+                cameraAngle === a
+                  ? 'bg-[#1FB5D6] text-[#052E16] border-[#1FB5D6]'
+                  : 'bg-[#242833] border-[rgba(255,255,255,0.10)] text-[#AAB0BD] hover:bg-[#323744] hover:border-[#555E72]'
+              }`}
+            >
+              {a === 'front_on' ? 'Front-on' : 'Side-on'}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-[#6E7486] mt-2">
+          <span>Batter hand</span>
+        </div>
+        <div className="flex gap-1">
+          {BATTER_HANDS.map((h) => (
+            <button
+              key={h}
+              onClick={() => onBatterHandChange(h)}
+              className={`flex-1 py-1.5 rounded-[8px] text-[11px] font-semibold border transition-colors ${
+                batterHand === h
+                  ? 'bg-[#1FB5D6] text-[#052E16] border-[#1FB5D6]'
+                  : 'bg-[#242833] border-[rgba(255,255,255,0.10)] text-[#AAB0BD] hover:bg-[#323744] hover:border-[#555E72]'
+              }`}
+            >
+              {h === 'right' ? 'Right' : 'Left'}
+            </button>
+          ))}
+        </div>
+      </div>
     </aside>
   );
 };

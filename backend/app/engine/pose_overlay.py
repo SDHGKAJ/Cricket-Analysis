@@ -17,6 +17,7 @@ Public API:
 """
 
 import subprocess
+from collections import deque
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -35,6 +36,14 @@ COCO_KEYPOINTS = [
 CONF_THRESHOLD = 0.3     # skip keypoints below this confidence
 SMOOTH_ALPHA = 0.6       # EMA weight for the new observation (1.0 = no smoothing)
 MAX_MISSED_FRAMES = 15   # reset smoothing state after this many frames without a pose
+
+# Ball drawing config (visual style matches cricket_analyzer HUD video)
+BALL_COLOR = (0, 165, 255)       # orange circle (BGR)
+BALL_DOT_COLOR = (255, 255, 255)  # white center dot
+BALL_CONF_MIN = 0.25             # min confidence to draw a detection
+BALL_TRAIL_LEN = 15              # fading trail length (frames)
+BALL_RADIUS = 7                  # ball circle radius in px
+BALL_LABEL_SCALE = 0.5           # confidence label text scale
 
 # ── Limb connections (COCO-18 indices) with fixed BGR colors ─────────────────
 # Arms: red/orange/yellow · Legs: blue/cyan · Shoulders/hips: green · Face: pink/magenta
@@ -271,6 +280,49 @@ def _draw_pose(frame: np.ndarray, pts: np.ndarray) -> None:
         cv2.circle(frame, (int(round(x)), int(round(y))), joint_radius, KEYPOINT_COLORS[i], -1, cv2.LINE_AA)
 
 
+def _put_text_outline(frame: np.ndarray, text: str, org: Tuple[int, int], scale: float,
+                      color: Tuple[int, int, int], thickness: int = 1) -> None:
+    """Draw text with a black outline for readability on any background."""
+    import cv2
+    cv2.putText(frame, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+    cv2.putText(frame, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
+
+
+def _draw_ball(frame: np.ndarray, x_px: float, y_px: float, conf: float) -> None:
+    """Draw one ball detection: orange circle + white center dot + 'ball 0.62' label."""
+    import cv2
+
+    cx, cy = int(round(x_px)), int(round(y_px))
+    cv2.circle(frame, (cx, cy), BALL_RADIUS, BALL_COLOR, 3, cv2.LINE_AA)
+    cv2.circle(frame, (cx, cy), 2, BALL_DOT_COLOR, -1, cv2.LINE_AA)
+    label = f"ball {conf:.2f}"
+    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, BALL_LABEL_SCALE, 1)
+    label_y = cy - BALL_RADIUS - 6
+    if label_y < th + 4:
+        label_y = cy + BALL_RADIUS + th + 4
+    _put_text_outline(frame, label, (cx - tw // 2, label_y), BALL_LABEL_SCALE, BALL_COLOR, 1)
+
+
+def _draw_ball_trail(frame: np.ndarray, trail: deque) -> None:
+    """Draw a fading trail of the last N ball positions."""
+    import cv2
+
+    n = len(trail)
+    if n < 2:
+        return
+    for j, (tx, ty) in enumerate(trail):
+        # Fade: older points are smaller and dimmer
+        t = j / max(n - 1, 1)
+        r = max(1, int(round(BALL_RADIUS * (0.3 + 0.7 * t))))
+        alpha = 0.3 + 0.7 * t
+        color = (
+            int(BALL_COLOR[0] * alpha),
+            int(BALL_COLOR[1] * alpha),
+            int(BALL_COLOR[2] * alpha),
+        )
+        cv2.circle(frame, (int(round(tx)), int(round(ty))), r, color, -1, cv2.LINE_AA)
+
+
 class _FFmpegH264Writer:
     """Streams raw BGR frames into ffmpeg to produce a true H.264 mp4."""
 
@@ -334,7 +386,10 @@ def _open_writer(output_path: str, fps: float, width: int, height: int):
     return writer, "opencv_mp4v"
 
 
-def analyze_video(input_path: str, output_path: str) -> str:
+def analyze_video(input_path: str, output_path: str,
+                  ball_positions: Optional[List[Optional[Tuple[float, float, float]]]] = None,
+                  ball_conf_min: float = BALL_CONF_MIN,
+                  ball_trail_len: int = BALL_TRAIL_LEN) -> str:
     """Annotate a video with an OpenPose-style skeleton overlay.
 
     Detects the person frame-by-frame (MediaPipe Pose mapped to COCO-18),
@@ -345,6 +400,10 @@ def analyze_video(input_path: str, output_path: str) -> str:
     Args:
         input_path:  Path to the source video (mp4/avi/mov).
         output_path: Path for the annotated mp4 output.
+        ball_positions: Per-frame ball detections indexed by frame index.
+            Each entry is ``None`` or ``(x_px, y_px, conf)`` in pixel space.
+        ball_conf_min: Minimum confidence to draw a ball detection.
+        ball_trail_len: Length of the fading ball trail (frames).
 
     Returns:
         The output_path written.
@@ -378,6 +437,7 @@ def analyze_video(input_path: str, output_path: str) -> str:
     smoothed: Optional[np.ndarray] = None
     missed_frames = 0
     frame_idx = 0
+    trail: deque = deque(maxlen=ball_trail_len)
 
     try:
         while True:
@@ -401,6 +461,18 @@ def analyze_video(input_path: str, output_path: str) -> str:
                 missed_frames += 1
                 if missed_frames > MAX_MISSED_FRAMES:
                     smoothed = None  # person gone long enough; reset tracker
+
+            # Draw ball detection + fading trail on top of the skeleton
+            ball = None
+            if ball_positions is not None and 0 <= frame_idx < len(ball_positions):
+                ball = ball_positions[frame_idx]
+            if ball is not None:
+                x_px, y_px, conf = ball
+                if conf >= ball_conf_min:
+                    _draw_ball(frame, x_px, y_px, conf)
+                    trail.append((x_px, y_px))
+            if trail:
+                _draw_ball_trail(frame, trail)
 
             writer.write(frame)
             frame_idx += 1

@@ -1,650 +1,453 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Plus, ShieldAlert, Clock, Play } from 'lucide-react';
-import {
-  CameraAngle,
-  BatterHand,
-  FrameLandmarks,
-  ShotAnalysis,
-  FlawItem,
-  TipItem,
-} from './types/cricket';
+import { Download, Play, RotateCcw } from 'lucide-react';
+import { CameraAngle, BatterHand, ShotAnalysis, CricketReport, MetricStatus } from './types/cricket';
 
-import { TopBar } from './components/TopBar';
-import { StickyMiniHeader } from './components/StickyMiniHeader';
 import { SideNav } from './components/SideNav';
-import { ScoreRing } from './components/ScoreRing';
-import { RadarChart } from './components/RadarChart';
-import { VideoOverlay } from './components/VideoOverlay';
-import { VideoUploader } from './components/VideoUploader';
-import { FlawCard } from './components/FlawCard';
-import { DrillCard } from './components/DrillCard';
-import { MetricBreakdown } from './components/MetricBreakdown';
-import { HistoryChart } from './components/HistoryChart';
-import { SessionDashboard } from './components/SessionDashboard';
-import {
-  EmptyState,
-  AnalyzingState,
-  ErrorState,
-  NoFlawsState,
-  LiveMode,
-} from './components/StateViews';
+import { UploadDropzone } from './components/UploadDropzone';
+import { VideoPlayer } from './components/VideoPlayer';
+import { WaveChart } from './components/WaveChart';
+import { MetricTile } from './components/MetricTile';
+import { StatusBadge } from './components/StatusBadge';
+import { FeedbackPanel } from './components/FeedbackPanel';
+import { buildMetricTiles, buildPhaseMarkers, groupFeedback, buildWaveSeries } from './services/reportMapper';
+import { uploadVideoShot, createBattingSession } from './services/api';
 
-import { evaluateCoverDriveClient } from './services/clientShotEvaluator';
-import { analyzeShotOnServer, createBattingSession } from './services/api';
+type Page = 'video' | 'drills';
+type AppState = 'empty' | 'processing' | 'results' | 'error';
 
-type AppState = 'empty' | 'analyzing' | 'error' | 'ready';
-
-/* ── Demo seed shot (rich mock data matching the data contract) ── */
-function makeDemoShot(cameraAngle: CameraAngle, batterHand: BatterHand): ShotAnalysis {
-  const frames: FrameLandmarks[] = Array.from({ length: 48 }, (_, i) => ({
-    frame_index: i,
-    timestamp_ms: i * 33.3,
-    landmarks: Array.from({ length: 33 }, () => ({ x: 0.5, y: 0.5, z: 0, visibility: 0.99 })),
-  }));
-
-  const shot = evaluateCoverDriveClient(frames, cameraAngle, batterHand);
-
-  /* Override with a realistic, varied mock result that exercises every UI state:
-     - overall 7.6 (amber band)
-     - one flaw with measured 0 -> should render "N/A" + warning
-     - one medium, one low flaw */
-  shot.overall_score = 7.6;
-  shot.timing_score = 8.1;
-  shot.shot_type = 'cover_drive';
-  shot.confidence = 91.4;
-  shot.delta_last_session = -0.3;
-  shot.impact_frame = 28;
-  shot.total_frames = 48;
-  shot.metrics = {
-    timing: 8.1,
-    head_position: 6.2,
-    front_elbow: 5.4,
-    footwork: 7.9,
-    balance: 8.3,
-    bat_swing_path: 7.4,
-    backlift: 8.0,
-    follow_through: 7.7,
-  };
-  shot.flaws = [
-    {
-      name: 'Front Elbow Dropping / Collapsed Arm',
-      severity: 'high',
-      frame: 24,
-      measured: 0, // intentionally missing telemetry -> renders N/A + warning
-      ideal: '70° – 110°',
-      affected_joint: batterHand === 'right' ? 'left_elbow' : 'right_elbow',
-    },
-    {
-      name: 'Head Falling Away to Off-Side',
-      severity: 'medium',
-      frame: 28,
-      measured: 7.2,
-      ideal: '0.0% – 4.5%',
-      affected_joint: 'nose',
-    },
-    {
-      name: 'Front Foot Not Reaching Pitch of Ball',
-      severity: 'low',
-      frame: 18,
-      measured: 0.62,
-      ideal: '0.85 – 1.45 norm',
-      affected_joint: batterHand === 'right' ? 'left_ankle' : 'right_ankle',
-    },
-  ];
-  shot.tips = [
-    {
-      flaw: 'Front Elbow Dropping / Collapsed Arm',
-      why_it_hurts:
-        'A collapsed elbow forces bottom-hand domination, chipping the ball in the air toward extra cover.',
-      fix: 'Point your front elbow directly at mid-off/cover throughout the downswing.',
-      drill: 'Top-Hand Only Tee Drives: 25 drives on a batting tee with top hand leading exclusively.',
-    },
-    {
-      flaw: 'Head Falling Away to Off-Side',
-      why_it_hurts:
-        'Eyeline tilts and hands follow the head outside the line, causing leading edges into slip/gully.',
-      fix: 'Lead into the drive with your head, keeping eyes level and chin tucked over your front knee.',
-      drill: 'Drop-Ball Target Driving: 25 drives freezing head dead-still over the bounce point for 2 seconds.',
-    },
-    {
-      flaw: 'Front Foot Not Reaching Pitch of Ball',
-      why_it_hurts:
-        'Reaching away without footwork causes lunging with hands disconnected from body weight.',
-      fix: 'Commit a positive stride toward the line and bounce, planting front toe toward cover.',
-      drill: 'Shadow Step & Freeze: 30 repetitions committing the front stride toward a chalk target.',
-    },
-  ];
-  shot.replay_url = '/replays/replay_upload_3979b792_slowmo.mp4';
-  return shot;
-}
-
-function variantShot(base: ShotAnalysis, score: number, shotType: string, id: string): ShotAnalysis {
-  return {
-    ...base,
-    shot_id: id,
-    shot_type: shotType,
-    overall_score: score,
-    timing_score: Number((score * 0.95 + 0.4).toFixed(1)),
-    delta_last_session: Number(((score - base.overall_score) * 0.5).toFixed(1)),
-    flaws: score >= 8 ? [] : base.flaws.slice(0, 1),
-    tips: score >= 8 ? [] : base.tips.slice(0, 1),
-  } as ShotAnalysis;
-}
-
-const DRILL_LIBRARY: Record<string, { title: string; desc: string; duration: string; reps: string; color: string; icon: React.ReactNode }> = {
-  elbow: {
-    title: 'Top-Hand Tee Drives',
-    desc: 'Fix collapsed front elbow by leading with the top hand on a batting tee.',
-    duration: '15 min',
-    reps: '3 × 15 drives',
-    color: 'text-emerald-400',
-    icon: <Play className="w-5 h-5 text-emerald-400" />,
-  },
-  head: {
-    title: 'Drop-Ball Target Driving',
-    desc: 'Keep head dead-still over bounce point to stop falling away off-side.',
-    duration: '20 min',
-    reps: '4 × 12 reps',
-    color: 'text-amber-400',
-    icon: <ShieldAlert className="w-5 h-5 text-amber-400" />,
-  },
-  line: {
-    title: 'Shadow Step & Freeze',
-    desc: 'Commit front stride toward the line; freeze at impact for 2 seconds.',
-    duration: '15 min',
-    reps: '3 × 20 reps',
-    color: 'text-sky-400',
-    icon: <Clock className="w-5 h-5 text-sky-400" />,
-  },
-  stride: {
-    title: 'Front Foot Plant Drill',
-    desc: 'Plant front toe toward cover; drive through the line with weight transfer.',
-    duration: '12 min',
-    reps: '3 × 15 steps',
-    color: 'text-emerald-400',
-    icon: <Play className="w-5 h-5 text-emerald-400" />,
-  },
-  balance: {
-    title: 'Shadow Hold Drill',
-    desc: 'Hold finish position for 3 seconds to build balance and control.',
-    duration: '10 min',
-    reps: '3 × 10 holds',
-    color: 'text-amber-400',
-    icon: <ShieldAlert className="w-5 h-5 text-amber-400" />,
-  },
-};
+const ANALYSIS_STEPS = [
+  { id: 'uploading', label: 'Uploading' },
+  { id: 'pose', label: 'Detecting pose' },
+  { id: 'shot', label: 'Analysing shot' },
+  { id: 'render', label: 'Rendering video' },
+] as const;
 
 export const App: React.FC = () => {
+  const [page, setPage] = useState<Page>('video');
   const [cameraAngle, setCameraAngle] = useState<CameraAngle>('front_on');
   const [batterHand, setBatterHand] = useState<BatterHand>('right');
-  const [playerName, setPlayerName] = useState('CC Ludimos');
-  const [playerId, setPlayerId] = useState('RHB #18');
-  const [navActive, setNavActive] = useState('video');
 
-  const [appState, setAppState] = useState<AppState>('ready');
+  const [appState, setAppState] = useState<AppState>('empty');
   const [errorMessage, setErrorMessage] = useState('');
+  const [isProcessing, setIsProcessing] = useState(false);
 
   const [activeShot, setActiveShot] = useState<ShotAnalysis | null>(null);
-  const [activeFrames, setActiveFrames] = useState<FrameLandmarks[]>([]);
-  const [shotsHistory, setShotsHistory] = useState<ShotAnalysis[]>([]);
+  const [cricketReport, setCricketReport] = useState<CricketReport | null>(null);
   const [sessionId, setSessionId] = useState<string | undefined>();
-  const [uploadOpen, setUploadOpen] = useState(false);
 
-  const [selectedJoint, setSelectedJoint] = useState<string | null>(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [highlightedDrillFlaw, setHighlightedDrillFlaw] = useState<string | null>(null);
-  const [replayFrame, setReplayFrame] = useState(0);
-  const [poseMissing, setPoseMissing] = useState(false);
+  /* Video player state */
+  const [playing, setPlaying] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1);
+  const [currentTimeMs, setCurrentTimeMs] = useState(0);
 
   useEffect(() => {
     createBattingSession('Batter 01', cameraAngle, batterHand)
       .then((s) => setSessionId(s.id))
       .catch(() => {});
+  }, [cameraAngle, batterHand]);
 
-    const demoFrames: FrameLandmarks[] = Array.from({ length: 48 }, (_, i) => ({
-      frame_index: i,
-      timestamp_ms: i * 33.3,
-      landmarks: Array.from({ length: 33 }, () => ({ x: 0.5, y: 0.5, z: 0, visibility: 0.99 })),
-    }));
-    const demo = makeDemoShot(cameraAngle, batterHand);
-    setActiveShot(demo);
-    setActiveFrames(demoFrames);
-    setShotsHistory([demo]);
-    setAppState('ready');
-  }, []);
+  const totalDurationMs = activeShot?.total_frames
+    ? activeShot.total_frames * (1000 / 29.75)
+    : 0;
 
-  const totalFrames = activeShot?.total_frames ?? activeFrames.length;
-  const impactFrame = activeShot?.impact_frame ?? Math.floor(totalFrames * 0.55);
+  useEffect(() => {
+    if (!activeShot?.cricket_report_url) {
+      setCricketReport(null);
+      return;
+    }
+    let cancelled = false;
+    fetch(activeShot.cricket_report_url)
+      .then((r) => {
+        if (!r.ok) throw new Error('Report unavailable');
+        return r.json();
+      })
+      .then((data) => { if (!cancelled) setCricketReport(data); })
+      .catch(() => { if (!cancelled) setCricketReport(null); });
+    return () => { cancelled = true; };
+  }, [activeShot?.cricket_report_url]);
 
-  /* Handle a captured / analyzed shot */
-  const handleShotCaptured = useCallback(
-    async (frames: FrameLandmarks[]) => {
-      setAppState('analyzing');
-      setIsAnalyzing(true);
-      setActiveFrames(frames);
-      setReplayFrame(0);
-      setHighlightedDrillFlaw(null);
+  useEffect(() => {
+    setIsProcessing(appState === 'processing');
+  }, [appState]);
 
-      try {
-        const instant = evaluateCoverDriveClient(frames, cameraAngle, batterHand);
-        setActiveShot(instant);
-        setShotsHistory((prev) => [...prev, instant]);
+  /* Video time sync while playing */
+  useEffect(() => {
+    if (!playing || appState !== 'results') return;
+    const t = setInterval(() => {
+      setCurrentTimeMs((prev) => {
+        const next = prev + 100;
+        if (next >= totalDurationMs) { setPlaying(false); return totalDurationMs; }
+        return next;
+      });
+    }, 100);
+    return () => clearInterval(t);
+  }, [playing, appState, totalDurationMs]);
 
-        const server = await analyzeShotOnServer(
-          frames,
-          cameraAngle,
-          batterHand,
-          sessionId,
-        );
-        setActiveShot(server);
-        setShotsHistory((prev) =>
-          prev.map((s) => (s.shot_id === instant.shot_id ? server : s)),
-        );
-        setAppState('ready');
-      } catch {
-        setAppState('ready');
-      } finally {
-        setIsAnalyzing(false);
-      }
-    },
-    [cameraAngle, batterHand, sessionId],
+  const report = cricketReport;
+  const metricTiles = buildMetricTiles(report);
+  const markers = buildPhaseMarkers(report);
+  const series = buildWaveSeries(report);
+  const feedbackItems = groupFeedback(activeShot?.feedback ?? []);
+  const currentMarker = markers.find(
+    (m) => currentTimeMs >= m.startMs && (m.endMs == null ? true : currentTimeMs <= m.endMs)
   );
-
-  const handleVideoComplete = (result: ShotAnalysis) => {
-    setActiveShot(result);
-    setActiveFrames(result.frames ?? []);
-    setShotsHistory((prev) => [...prev, result]);
-    setAppState('ready');
-    setPoseMissing(!result.pose_video_url);
-  };
-
-  const handleSelectShot = (shot: ShotAnalysis) => {
-    setActiveShot(shot);
-    setSelectedJoint(null);
-    setReplayFrame(0);
-    setHighlightedDrillFlaw(null);
-  };
-
-  /* "Fix" button: jump to the flaw frame + highlight the matching drill */
-  const handleFixFlaw = (frame: number, flawName: string) => {
-    setReplayFrame(frame);
-    setSelectedJoint(null);
-    setHighlightedDrillFlaw(flawName);
-    setAppState('ready');
-    const el = document.getElementById('section-drills');
-    el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  };
+  const tooltip = currentMarker && report
+    ? {
+        phase: currentMarker.label,
+        timeMs: currentTimeMs,
+        speed: report.timing?.swing_speed_mps ?? 2.5,
+      }
+    : null;
 
   const handleReset = () => {
     setAppState('empty');
     setActiveShot(null);
-    setActiveFrames([]);
-    setShotsHistory([]);
-    setReplayFrame(0);
-    setHighlightedDrillFlaw(null);
-    setSelectedJoint(null);
-    setPoseMissing(false);
+    setCricketReport(null);
+    setErrorMessage('');
+    setPlaying(false);
+    setCurrentTimeMs(0);
   };
 
-  const hasShots = shotsHistory.length > 0;
-  const showScore = activeShot != null;
+  const handleVideoComplete = (result: ShotAnalysis) => {
+    setActiveShot(result);
+    setAppState('results');
+    setPlaying(true);
+  };
 
-  // ⚠️ ALL DASHBOARD CONTENT COMMENTED OUT (UI shell only).
-  // Flip to true to restore: empty/upload state, analysis hero,
-  // flaws + drills row, metric breakdown + history row, drill library,
-  // and session dashboard.
-  const SHOW_DASHBOARD_CONTENT = false;
+  const handleUploadError = (err: string) => {
+    setErrorMessage(err);
+    setAppState('error');
+  };
+
+  const handleUpload = (files: FileList) => {
+    const file = files[0];
+    const err = validateFile(file);
+    if (err) { handleUploadError(err); return; }
+    setAppState('processing');
+    setErrorMessage('');
+    uploadVideoShot(file, cameraAngle, batterHand, sessionId)
+      .then(handleVideoComplete)
+      .catch((e) => handleUploadError(e.message || 'Upload failed'));
+  };
+
+  const validateFile = (file: File): string | null => {
+    const name = file.name.toLowerCase();
+    const okType =
+      file.type.includes('mp4') || file.type.includes('quicktime') || file.type.includes('msvideo') ||
+      name.endsWith('.mp4') || name.endsWith('.mov') || name.endsWith('.avi');
+    if (!okType) return 'Only MP4, MOV and AVI video files are accepted.';
+    if (file.size > 200 * 1024 * 1024) return 'File too large — max 200 MB.';
+    return null;
+  };
+
+  const ratingStatus = (score: number | null | undefined): MetricStatus => {
+    if (score == null) return 'not_detected';
+    if (score >= 8) return 'good';
+    if (score >= 5) return 'medium';
+    return 'bad';
+  };
+
+  const ratingLabel = (score: number | null | undefined): string => {
+    if (score == null) return 'Not rated';
+    if (score >= 8) return 'Excellent';
+    if (score >= 6) return 'Strong';
+    if (score >= 5) return 'Fair';
+    return 'Needs work';
+  };
+
+  const overallScore = activeShot?.overall_score ?? null;
 
   return (
-    <div className="min-h-screen text-slate-100 bg-[#0B1220] selection:bg-emerald-500/30 selection:text-white">
-      {/* Sticky mini header — score + shot type on scroll */}
-      <StickyMiniHeader activeShot={showScore ? activeShot : null} />
+    <div className="min-h-screen bg-[#2B2F3A] text-[#AAB0BD] font-sans selection:bg-[#1FB5D6]/30 selection:text-white">
+      {/* Header */}
+      <header className="fixed top-0 left-0 right-0 z-30 h-14 bg-[#242833] border-b border-[rgba(255,255,255,0.06)] flex items-center justify-between px-4 lg:px-6 shrink-0">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-bold text-[#FFFFFF] tracking-tight">Overview</span>
+        </div>
+        <div className="flex items-center gap-3">
+          <button className="text-xs text-[#6E7486] hover:text-[#FFFFFF] underline underline-offset-2">Help</button>
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-[8px] border border-[rgba(255,255,255,0.10)] bg-[#323744]/50 text-[11px] text-[#FFFFFF] font-semibold">
+            🏏 CricVision Pro
+          </div>
+        </div>
+      </header>
 
-      {/* ── Layout shell: sidebar + main ── */}
-      <div className="flex h-[calc(100vh-80px)]">
-        {/* Left sidebar navigation */}
+      <div className="flex h-[calc(100vh-56px)]">
+        {/* Sidebar */}
         <SideNav
-          active={navActive}
-          onSelect={setNavActive}
-          playerName={playerName}
-          playerId={playerId}
-          onPlayerChange={() => setPlayerName(p => (p === 'CC Ludimos' ? 'Steve Smith' : 'CC Ludimos'))}
+          active={page}
+          onSelect={setPage}
+          cameraAngle={cameraAngle}
+          onCameraAngleChange={setCameraAngle}
+          batterHand={batterHand}
+          onBatterHandChange={setBatterHand}
         />
 
-        {/* Main content area */}
-        <div className="flex-1 overflow-y-auto bg-[#0B1220] relative">
-          {/* Top navigation bar */}
-          <TopBar
-            cameraAngle={cameraAngle}
-            batterHand={batterHand}
-            activeMode={navActive}
-            onModeChange={setNavActive}
-            onCameraAngleChange={setCameraAngle}
-            onBatterHandChange={setBatterHand}
-            totalShots={shotsHistory.length}
-            onNewShot={handleReset}
-            onAnalyze={handleShotCaptured}
-            isAnalyzing={isAnalyzing}
-          />
-
-          <main className="max-w-screen-xl mx-auto px-4 lg:px-8 pt-6 pb-20 space-y-8">
-
-            {/* ═════════════════════════════════════════════════════════════
-                POSE ANALYSIS ONLY — upload video → OpenPose-style annotated video
-                (shown while SHOW_DASHBOARD_CONTENT is false)
-                ══════════════════════════════════════════════════════════ */}
-            {!SHOW_DASHBOARD_CONTENT && (
-              <div className="max-w-3xl mx-auto space-y-6">
-                {/* Result: annotated skeleton video */}
-                {activeShot?.pose_video_url ? (
-                  <div className="glass-panel rounded-2xl overflow-hidden border border-white/8 fade-in">
-                    <div className="flex items-center justify-between px-4 py-3 border-b border-white/6">
-                      <div className="flex items-center gap-2">
-                        <span className="w-1.5 h-1.5 rounded-full bg-fuchsia-400 animate-pulse" />
-                        <h4 className="text-xs font-bold text-white">Pose Analysis</h4>
-                        <span className="text-[10px] text-slate-500 font-numeric">OpenPose-style · COCO-18</span>
-                      </div>
-                      <button
-                        onClick={handleReset}
-                        className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-bold text-slate-300 hover:text-white transition-all"
-                      >
-                        Analyze another
-                      </button>
-                    </div>
-                    <video
-                      src={activeShot.pose_video_url}
-                      controls
-                      autoPlay
-                      playsInline
-                      muted
-                      className="w-full max-h-[70vh] bg-black object-contain"
-                    />
-                  </div>
-                ) : (
-                  /* Input: reuse the existing upload handler */
-                  <VideoUploader
-                    cameraAngle={cameraAngle}
-                    batterHand={batterHand}
-                    sessionId={sessionId}
-                    onAnalysisComplete={(result) => {
-                      handleVideoComplete(result);
-                    }}
-                  />
-                )}
-
-                {/* Cricket shot analysis: HUD-annotated video + feedback list */}
-                {activeShot?.cricket_video_url && (
-                  <div className="glass-panel rounded-2xl overflow-hidden border border-white/8 fade-in">
-                    <div className="flex items-center justify-between px-4 py-3 border-b border-white/6">
-                      <div className="flex items-center gap-2">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                        <h4 className="text-xs font-bold text-white">Shot Analysis</h4>
-                        <span className="text-[10px] text-slate-500 font-numeric">HUD · weight · contact · phases</span>
-                      </div>
-                      {activeShot.cricket_report_url && (
-                        <a
-                          href={activeShot.cricket_report_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-bold text-slate-300 hover:text-white transition-all"
-                        >
-                          JSON report
-                        </a>
-                      )}
-                    </div>
-                    <video
-                      src={activeShot.cricket_video_url}
-                      controls
-                      autoPlay
-                      playsInline
-                      muted
-                      className="w-full max-h-[70vh] bg-black object-contain"
-                    />
-                    {activeShot.feedback && activeShot.feedback.length > 0 && (
-                      <ul className="px-4 py-3 space-y-1.5 border-t border-white/6">
-                        {activeShot.feedback.map((line, i) => (
-                          <li key={i} className="flex items-start gap-2 text-[11px] text-slate-300">
-                            <span className="mt-1 w-1 h-1 rounded-full bg-emerald-400/80 shrink-0" />
-                            {line}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                )}
-
-                {/* Backend unavailable → explain why no annotated video */}
-                {poseMissing && (
-                  <p className="text-[11px] text-amber-400/80 text-center">
-                    No annotated video returned — check that the backend on port 8000 is running.
-                  </p>
-                )}
+        <main className="flex-1 overflow-y-auto bg-[#2B2F3A] p-4 lg:p-6">
+          {/* Drills page (minimal, UI-only) */}
+          {page === 'drills' && (
+            <section className="max-w-5xl mx-auto space-y-6 fade-in">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h1 className="text-2xl font-bold text-[#FFFFFF]">Coach Drills</h1>
+                  <p className="text-xs text-[#6E7486] mt-1">Targeted practice prescriptions for every stroke flaw.</p>
+                </div>
               </div>
-            )}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {[
+                  { id: 'elbow', title: 'Top-Hand Tee Drives', desc: 'Fix collapsed front elbow by leading with the top hand on a batting tee.', duration: '15 min', reps: '3 × 15 drives' },
+                  { id: 'head', title: 'Drop-Ball Target Driving', desc: 'Keep head dead-still over the bounce point to stop falling away off-side.', duration: '20 min', reps: '4 × 12 reps' },
+                  { id: 'line', title: 'Shadow Step & Freeze', desc: 'Commit front stride toward the line; freeze at impact for 2 seconds.', duration: '15 min', reps: '3 × 20 reps' },
+                ].map((d) => (
+                  <article key={d.id} className="panel p-4 flex flex-col h-full fade-in">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="w-8 h-8 rounded-[8px] bg-[#1FB5D6]/15 border border-[#1FB5D6]/30 flex items-center justify-center text-[#1FB5D6]">
+                        <Play className="w-4 h-4" />
+                      </span>
+                      <span className="text-[10px] font-bold border border-[#1FB5D6]/30 text-[#1FB5D6] bg-[#1FB5D6]/10 px-2 py-0.5 rounded-full uppercase tracking-tighter">
+                        {d.duration}
+                      </span>
+                    </div>
+                    <h3 className="text-sm font-bold text-[#FFFFFF]">{d.title}</h3>
+                    <p className="text-[12px] text-[#6E7486] leading-relaxed mb-2 flex-1">{d.desc}</p>
+                    <div className="mt-auto flex items-center justify-between text-[11px] text-[#6E7486] font-numeric">
+                      <span>{d.reps}</span>
+                      <button className="text-[#1FB5D6] hover:text-[#5CC8E0] underline underline-offset-2 font-semibold">Start</button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </section>
+          )}
 
-            {/* ═════════════════════════════════════════════════════════════
-                VIDEO STUDIO — full analysis dashboard
-                ══════════════════════════════════════════════════════════ */}
-            {SHOW_DASHBOARD_CONTENT && navActive === 'video' && (
-              <>
-                {/* EMPTY / ANALYZING / ERROR / LIVE STATES */}
-                {appState === 'empty' && !hasShots ? (
-                  <>
-                    <EmptyState onAnalyze={handleShotCaptured} onUpload={() => setUploadOpen(true)} />
-                    {uploadOpen && (
-                      <div className="fixed inset-0 z-50 bg-[#0B1220]/90 backdrop-blur-xl flex items-center justify-center p-4 sm:p-8">
-                        <div className="bg-[#0A1020] border border-white/8 rounded-3xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden">
-                          <div className="px-6 py-4 border-b border-white/6 flex items-center justify-between">
-                            <h3 className="text-lg font-bold text-white">Upload shot video</h3>
-                            <button
-                              onClick={() => setUploadOpen(false)}
-                              className="w-8 h-8 rounded-full bg-slate-900 hover:bg-white/10 text-slate-300 hover:text-white flex items-center justify-center transition-all"
-                            >
-                              <span className="text-sm">✕</span>
-                            </button>
-                          </div>
-                          <div className="flex-1 overflow-y-auto p-6">
-                            <VideoUploader
-                              cameraAngle={cameraAngle}
-                              batterHand={batterHand}
-                              sessionId={sessionId}
-                              onAnalysisComplete={(result) => {
-                                setUploadOpen(false);
-                                handleVideoComplete(result);
-                              }}
-                            />
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </>
-                ) : null}
-
-                {appState === 'analyzing' && activeShot ? (
-                  <AnalyzingState shot={activeShot} frames={activeFrames} />
-                ) : null}
-
-                {appState === 'error' ? (
-                  <ErrorState message={errorMessage || 'Analysis failed. Please try again.'} onRetry={handleReset} />
-                ) : null}
-
-                {/* DASHBOARD (single-scroll, no tabs) */}
-                {showScore && appState === 'ready' && (
-                  <>
-                    {/* ── ROW 1: HERO — 3 columns ── */}
-                    <section
-                      id="section-hero"
-                      className="grid grid-cols-1 lg:grid-cols-12 gap-6"
-                      aria-label="Analysis hero"
-                    >
-                      {/* LEFT (6 cols): Video player + phase timeline */}
-                      <div className="lg:col-span-6 space-y-4">
-                        <VideoOverlay
-                          frames={activeFrames}
-                          flaws={activeShot.flaws}
-                          impactFrame={impactFrame}
-                          totalFrames={totalFrames}
-                          replayVideoUrl={activeShot.replay_url}
-                          selectedJoint={selectedJoint}
-                          onJointSelect={setSelectedJoint}
-                          seekToFrame={replayFrame}
-                          onFrameChange={setReplayFrame}
-                        />
-
-                        {/* OpenPose-style annotated video (pose overlay) */}
-                        {activeShot.pose_video_url && (
-                          <div className="glass-panel rounded-2xl overflow-hidden border border-white/8 fade-in">
-                            <div className="flex items-center gap-2 px-4 py-3 border-b border-white/6">
-                              <span className="w-1.5 h-1.5 rounded-full bg-fuchsia-400 animate-pulse" />
-                              <h4 className="text-xs font-bold text-white">Pose Overlay</h4>
-                              <span className="text-[10px] text-slate-500 font-numeric">OpenPose-style · COCO-18</span>
-                            </div>
-                            <video
-                              src={activeShot.pose_video_url}
-                              controls
-                              playsInline
-                              muted
-                              className="w-full max-h-[360px] bg-black object-contain"
-                            />
-                          </div>
-                        )}
-                      </div>
-
-                      {/* MIDDLE (3 cols): Overall Score card */}
-                      <div className="lg:col-span-3 space-y-4">
-                        <ScoreRing
-                          overallScore={activeShot.overall_score}
-                          timingScore={activeShot.timing_score}
-                          shotType={activeShot.shot_type}
-                          confidence={activeShot.confidence}
-                          deltaLastSession={activeShot.delta_last_session}
-                        />
-                      </div>
-
-                      {/* RIGHT (3 cols): Radar chart */}
-                      <div className="lg:col-span-3 space-y-4">
-                        {activeShot.metrics ? (
-                          <RadarChart metrics={activeShot.metrics} />
-                        ) : null}
-                      </div>
-                    </section>
-
-                    {/* ── ROW 2: Flaws + Drills ── */}
-                    <section id="section-flaws" className="grid grid-cols-1 lg:grid-cols-2 gap-6" aria-label="Flaws and drills">
-                      <div className="space-y-4">
-                        {activeShot.flaws.length === 0 ? (
-                          <NoFlawsState />
-                        ) : (
-                          <FlawCard
-                            flaws={activeShot.flaws}
-                            tips={activeShot.tips}
-                            onFixClick={handleFixFlaw}
-                            selectedJoint={selectedJoint}
-                            onJointSelect={setSelectedJoint}
-                          />
-                        )}
-                      </div>
-                      <div id="section-drills" className="space-y-4">
-                        <DrillCard
-                          tips={activeShot.tips}
-                          highlightedDrillFlaw={highlightedDrillFlaw}
-                        />
-                      </div>
-                    </section>
-
-                    {/* ── ROW 3: Metric breakdown + History ── */}
-                    <section id="section-row3" className="grid grid-cols-1 lg:grid-cols-2 gap-6" aria-label="Breakdown and history">
-                      <div className="space-y-4">
-                        {activeShot.metrics ? (
-                          <MetricBreakdown metrics={activeShot.metrics} />
-                        ) : null}
-                      </div>
-                      <div className="space-y-4">
-                        <HistoryChart
-                          shotsHistory={shotsHistory}
-                          onSelectShot={handleSelectShot}
-                          activeShotId={activeShot.shot_id}
-                        />
-                      </div>
-                    </section>
-                  </>
-                )}
-              </>
-            )}
-
-            {/* ══════════════════════════════════════════════════════════════
-                COACH DRILLS — drill library & practice plan
-                ══════════════════════════════════════════════════════════ */}
-            {SHOW_DASHBOARD_CONTENT && navActive === 'drills' && (
-              <section className="space-y-6" aria-label="Coach Drills">
-                <div className="glass-panel rounded-2xl p-6 border border-slate-700/60 shadow-xl">
-                  <div className="flex items-center justify-between mb-6">
+          {/* Video analysis page */}
+          {page === 'video' && (
+            <section className="max-w-5xl mx-auto space-y-6 fade-in">
+              {/* EMPTY — upload */}
+              {appState === 'empty' && (
+                <>
+                  <div className="flex items-center justify-between">
                     <div>
-                      <h2 className="text-xl font-extrabold text-white tracking-tight">Coach Drills</h2>
-                      <p className="text-xs text-slate-400 mt-1">Targeted practice prescriptions for every stroke flaw</p>
+                      <h1 className="text-2xl font-bold text-[#FFFFFF]">Analyse a shot</h1>
+                      <p className="text-xs text-[#6E7486] mt-1">
+                        Upload a single-batsman practice clip. Pose overlay and shot HUD are generated automatically.
+                      </p>
                     </div>
                   </div>
+                  <UploadDropzone
+                    onFiles={handleUpload}
+                    disabled={isProcessing}
+                    error={errorMessage}
+                    setError={setErrorMessage}
+                  />
+                </>
+              )}
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                    {Object.entries(DRILL_LIBRARY).map(([key, drill]) => (
-                      <div key={key} className="cv-card p-4 flex flex-col h-full fade-in">
-                        <div className="flex items-center gap-2 mb-3">
-                          <div className={`cv-icon-wrap ${drill.color}`}>
-                            {drill.icon}
-                          </div>
-                          <span className="cv-badge cv-badge-outline text-[10px]">{drill.duration}</span>
+              {/* ERROR — shown whenever upload fails */}
+              {appState === 'error' && (
+                <div className="mt-4 panel p-4 border-[#F4533F]/30 bg-[#F4533F]/10 text-[12px] text-[#F4533F] flex items-start gap-2">
+                  <RotateCcw className="w-4 h-4 shrink-0 mt-0.5 text-[#F4533F]" />
+                  <div>
+                    <p className="font-semibold text-[#FFFFFF]">{errorMessage}</p>
+                    <button
+                      onClick={handleReset}
+                      className="mt-2 text-xs text-[#1FB5D6] hover:text-[#5CC8E0] underline underline-offset-1"
+                    >
+                      Try again
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* PROCESSING */}
+              {appState === 'processing' && (
+                <>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h1 className="text-2xl font-bold text-[#FFFFFF]">Analysing your shot</h1>
+                      <p className="text-xs text-[#6E7486] mt-1">
+                        Pose detection, shot metrics and annotated video are being generated.
+                      </p>
+                    </div>
+                    <button
+                      onClick={handleReset}
+                      className="text-xs text-[#6E7486] hover:text-[#FFFFFF] underline underline-offset-1"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  <div className="space-y-3">
+                    {ANALYSIS_STEPS.map((step, i) => (
+                      <div key={step.id} className="flex items-center gap-3">
+                        <div
+                          className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold border ${
+                            i === 0
+                              ? 'border-[#1FB5D6] bg-[#1FB5D6]/15 text-[#1FB5D6] animate-pulse'
+                              : 'border-[rgba(255,255,255,0.12)] text-[#6E7486]'
+                          }`}
+                        >
+                          {i + 1}
                         </div>
-                        <h3 className="text-sm font-bold text-white">{drill.title}</h3>
-                        <p className="text-[11px] text-slate-400 leading-relaxed mb-3">{drill.desc}</p>
-                        <div className="flex items-center justify-between text-[10px] font-numeric text-slate-400 mt-auto">
-                          <span>
-                            <Clock className="w-3 h-3 text-slate-500 shrink-0 mr-1" />
-                            {drill.reps}
-                          </span>
-                          <button className="flex items-center gap-1 px-2 py-1 rounded-md bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-bold hover:bg-emerald-500/20 transition-all">
-                            <Play className="w-3 h-3" /> Start
-                          </button>
+                        <span className={`text-sm font-medium ${i === 0 ? 'text-[#FFFFFF]' : 'text-[#6E7486]'}`}>
+                          {step.label}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    {[1, 2, 3, 4].map((i) => (
+                      <div key={i} className="panel p-4 flex flex-col gap-2 min-h-[200px]">
+                        <div className="flex gap-2">
+                          <div className="skeleton h-4 w-1/3" />
+                          <div className="skeleton h-4 w-1/2" />
+                        </div>
+                        <div className="flex-1">
+                          <div className="skeleton h-20 w-full mb-2" />
+                          <div className="skeleton h-4 w-3/4" />
+                          <div className="skeleton h-4 w-1/2" />
                         </div>
                       </div>
                     ))}
                   </div>
-                </div>
+                </>
+              )}
 
-                {activeShot && activeShot.tips.length > 0 && (
-                  <div className="glass-panel rounded-2xl p-6 border border-slate-700/60 shadow-xl">
-                    <h3 className="text-sm font-bold text-white mb-4">Prescribed for your latest shot</h3>
-                    <DrillCard
-                      tips={activeShot.tips}
-                      highlightedDrillFlaw={highlightedDrillFlaw}
-                    />
+              {/* RESULTS */}
+              {appState === 'results' && activeShot && (
+                <>
+                  {/* Summary card */}
+                  <section className="panel p-5 rounded-[16px] relative overflow-hidden bg-gradient-to-br from-[#323744] to-[#2B2F3A] border border-[rgba(255,255,255,0.08)] fade-in">
+                    <div className="absolute inset-0 bg-gradient-to-r from-[#1FB5D6]/10 to-[#7B7FE0]/10 -z-10" />
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <div className="text-[10px] font-bold text-[#1FB5D6] uppercase tracking-wider mb-1">Overall rating</div>
+                        <div className="flex items-end gap-1">
+                          <span className="text-4xl font-bold text-[#FFFFFF] font-numeric leading-none">
+                            {overallScore == null ? '—' : overallScore.toFixed(1)}
+                          </span>
+                          <span className="text-xs text-[#6E7486] font-numeric">/ 10</span>
+                        </div>
+                        <StatusBadge
+                          status={ratingStatus(overallScore)}
+                          label={ratingLabel(overallScore)}
+                        />
+                        <p className="text-[11px] text-[#6E7486] mt-2">
+                          {activeShot.shot_type ? `Shot: ${activeShot.shot_type.replace(/_/g, ' ')}` : ''}
+                          {activeShot.confidence != null ? ` · confidence ${activeShot.confidence.toFixed(0)}%` : ''}
+                          {activeShot.total_frames ? ` · ${activeShot.total_frames} frames` : ''}
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        {activeShot.cricket_report_url && (
+                          <a
+                            href={activeShot.cricket_report_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[8px] border border-[rgba(255,255,255,0.10)] bg-[#242833]/60 text-[11px] font-semibold text-[#FFFFFF] hover:bg-[#323744] transition-colors"
+                          >
+                            <Download className="w-3 h-3" /> Download JSON
+                          </a>
+                        )}
+                      </div>
+                    </div>
+                  </section>
+
+                  {/* Wave chart */}
+                  <WaveChart
+                    series={series}
+                    markers={markers}
+                    currentTimeMs={currentTimeMs}
+                    totalDurationMs={totalDurationMs}
+                    onSeekTime={setCurrentTimeMs}
+                    tooltip={tooltip}
+                  />
+
+                  {/* Metric tiles grid */}
+                  <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4" aria-label="Metric tiles">
+                    {metricTiles.map((t) => (
+                      <MetricTile key={t.key} tile={t} />
+                    ))}
+                  </section>
+
+                  {/* Videos + Feedback panel */}
+                  <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                    {/* Left: videos (7 cols) */}
+                    <div className="lg:col-span-7 space-y-4">
+                      {activeShot.pose_video_url && (
+                        <section className="panel p-4 flex flex-col gap-3 fade-in">
+                          <div className="flex items-center justify-between">
+                            <h3 className="text-xs font-bold text-[#FFFFFF] uppercase tracking-wider">Pose overlay</h3>
+                            <span className="text-[10px] text-[#6E7486] font-numeric">OpenPose-style · COCO-18</span>
+                          </div>
+                          <VideoPlayer
+                            src={activeShot.pose_video_url}
+                            totalFrames={activeShot.total_frames ?? 0}
+                            currentTimeMs={currentTimeMs}
+                            onSeekTime={setCurrentTimeMs}
+                            playbackRate={playbackRate}
+                            onRateChange={setPlaybackRate}
+                            playing={playing}
+                            onTogglePlay={() => setPlaying((p) => !p)}
+                          />
+                        </section>
+                      )}
+                      {activeShot.cricket_video_url && (
+                        <section className="panel p-4 flex flex-col gap-3 fade-in">
+                          <div className="flex items-center justify-between">
+                            <h3 className="text-xs font-bold text-[#FFFFFF] uppercase tracking-wider">Shot analysis (HUD)</h3>
+                            <span className="text-[10px] text-[#6E7486] font-numeric">Weight · contact · phases</span>
+                          </div>
+                          <VideoPlayer
+                            src={activeShot.cricket_video_url}
+                            totalFrames={activeShot.total_frames ?? 0}
+                            currentTimeMs={currentTimeMs}
+                            onSeekTime={setCurrentTimeMs}
+                            playbackRate={playbackRate}
+                            onRateChange={setPlaybackRate}
+                            playing={playing}
+                            onTogglePlay={() => setPlaying((p) => !p)}
+                          />
+                        </section>
+                      )}
+                      {!activeShot.pose_video_url && !activeShot.cricket_video_url && (
+                        <div className="panel p-12 text-center">
+                          <span className="text-[12px] text-[#6E7486]">No annotated video returned by the backend.</span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Right: feedback panel (5 cols) */}
+                    <div className="lg:col-span-5">
+                      <FeedbackPanel items={feedbackItems} />
+                    </div>
                   </div>
-                )}
-              </section>
-            )}
 
-            {/* ═════════════════════════════════════════════════════════════
-                DASHBOARD — session analytics & history
-                ══════════════════════════════════════════════════════════ */}
-            {SHOW_DASHBOARD_CONTENT && navActive === 'dashboard' && (
-              <section className="space-y-6" aria-label="Dashboard">
-                <div className="glass-panel rounded-2xl p-6 border border-slate-700/60 shadow-xl">
-                  <SessionDashboard
-                    shotsHistory={shotsHistory}
-                    onSelectShot={handleSelectShot}
-                    activeShotId={activeShot?.shot_id}
-                  />
+                  {/* Collapsible raw report */}
+                  <details className="panel p-3 fade-in text-xs">
+                    <summary className="flex items-center gap-2 cursor-pointer text-[#6E7486] font-semibold">
+                      Raw report (JSON)
+                    </summary>
+                    <pre className="mt-2 p-3 rounded-[8px] bg-[#161920] border border-[rgba(255,255,255,0.04)] text-[10px] text-[#6E7486] overflow-x-auto max-h-64 font-numeric">
+                      {JSON.stringify(report ?? activeShot?.feedback ?? null, null, 2)}
+                    </pre>
+                  </details>
+                </>
+              )}
+
+              {/* ERROR */}
+              {appState === 'error' && !activeShot && (
+                <div className="panel p-8 text-center">
+                  <RotateCcw className="w-10 h-10 text-[#F4533F] mx-auto mb-3 animate-spin" />
+                  <h2 className="text-lg font-bold text-[#FFFFFF]">Upload failed</h2>
+                  <p className="text-xs text-[#6E7486] mt-1">{errorMessage || 'Please try again.'}</p>
+                  <button onClick={handleReset} className="mt-4 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-[8px] border border-[#1FB5D6] bg-[#1FB5D6] text-[#052E16] font-bold text-sm hover:bg-[#5CC8E0] transition-colors">
+                    <RotateCcw className="w-3 h-3" /> Try again
+                  </button>
                 </div>
-                <div className="glass-panel rounded-2xl p-6 border border-slate-700/60 shadow-xl">
-                  <HistoryChart
-                    shotsHistory={shotsHistory}
-                    onSelectShot={handleSelectShot}
-                    activeShotId={activeShot?.shot_id}
-                  />
-                </div>
-              </section>
-            )}
-          </main>
-        </div>
+              )}
+            </section>
+          )}
+        </main>
       </div>
     </div>
   );
