@@ -65,6 +65,7 @@ export interface ShotAnalysis {
   confidence?: number;
   delta_last_session?: number;
   frames?: FrameLandmarks[];
+  video_url?: string;
 }
 
 export interface SessionRecord {

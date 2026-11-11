@@ -6,6 +6,7 @@ coach drills, video processing, and session history management.
 """
 
 import os
+import re
 import uuid
 import datetime
 from pathlib import Path
@@ -13,6 +14,7 @@ from typing import List, Optional, Dict, Any
 
 from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
@@ -35,6 +37,7 @@ from .engine.yolo_tracker import CricketObjectTracker
 from .engine.slowmo_generator import SlowMoReplayGenerator
 from .engine.pose_overlay import analyze_video as analyze_pose_overlay
 from .engine.cricket_analyzer import analyze_cricket_shot
+from .engine.video_normalizer import probe_video, normalize_video, is_compatible
 from .engine.yolo_tracker import CricketBallTracker
 
 # Initialize database tables
@@ -256,34 +259,46 @@ async def analyze_video_upload(
     with open(saved_path, "wb") as f:
         f.write(contents)
 
-    # Re-encode uploaded video to fix missing moov atom and ensure OpenCV
-    # compatibility (some MP4s have the moov atom at the end, which OpenCV
-    # cannot read). Uses imageio-ffmpeg's bundled ffmpeg binary.
+    # Probe + normalize uploaded video for browser compatibility.
+    # Converts non-H.264/yuv420p/MP4 files, fixes missing moov atoms,
+    # and caps resolution at 1280px long side (keeps original fps so ball
+    # tracking frame counts stay valid).
+    normalized_path: Optional[Path] = None
+    probe_info: Dict[str, Any] = {}
     try:
-        import subprocess
-        import imageio_ffmpeg
-        fixed_path = UPLOAD_DIR / f"fixed_{file_id}.mp4"
-        result = subprocess.run(
-            [
-                imageio_ffmpeg.get_ffmpeg_exe(),
-                "-i", str(saved_path),
-                "-c:v", "libx264", "-preset", "fast",
-                "-movflags", "+faststart",
-                "-y", str(fixed_path),
-            ],
-            capture_output=True,
-            timeout=60,
-        )
-        if result.returncode == 0 and fixed_path.exists():
-            saved_path = fixed_path  # Use re-encoded version for all processing
-    except Exception:
-        pass  # If re-encoding fails, use original; downstream handles gracefully
+        probe_info = probe_video(saved_path)
+    except RuntimeError:
+        probe_info = {}
+
+    if probe_info and is_compatible(probe_info):
+        # Already H.264 + yuv420p + MP4 — use as-is.
+        normalized_path = saved_path
+    else:
+        # Needs normalization — convert to H.264 yuv420p MP4.
+        norm_filename = f"fixed_{file_id}.mp4"
+        norm_path = UPLOAD_DIR / norm_filename
+        try:
+            probe_info = normalize_video(saved_path, norm_path)
+            normalized_path = norm_path
+        except RuntimeError as norm_exc:
+            # ffmpeg cannot read or convert this file — return a clear error.
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "video_normalization_failed",
+                    "reason": str(norm_exc),
+                    "hint": "Upload an H.264-encoded MP4 file (e.g. from a phone or screen recorder).",
+                },
+            )
+
+    # Use the normalized (or original compatible) file for all downstream processing.
+    processing_path = normalized_path if normalized_path else saved_path
 
     # Run OpenCV video landmark & kinematic processing
     frames_data: List[Dict[str, Any]] = []
     try:
         import cv2
-        cap = cv2.VideoCapture(str(saved_path))
+        cap = cv2.VideoCapture(str(processing_path))
 
         if not cap.isOpened():
             # Video file cannot be opened (e.g., missing moov atom in MP4).
@@ -359,7 +374,7 @@ async def analyze_video_upload(
     # Also build pixel-space ball positions for the pose-overlay video drawing.
     ball_positions: List[Optional[Tuple[float, float, float]]] = [None] * len(frames_data)
     try:
-        tracking = object_tracker.track_objects_in_sequence(frames_data, video_path=str(saved_path))
+        tracking = object_tracker.track_objects_in_sequence(frames_data, video_path=str(processing_path))
         for i, track in enumerate(tracking):
             if i < len(frames_data) and track.get("ball_pos"):
                 bx, by = track["ball_pos"]
@@ -381,7 +396,7 @@ async def analyze_video_upload(
 
     # Generate slow-mo video replay
     replay_path = replay_generator.annotate_video_clip(
-        video_path=str(saved_path),
+        video_path=str(processing_path),
         frames_analysis=frames_data,
         flaws=[f.model_dump() for f in result.flaws],
         impact_frame=result.impact_frame or 20
@@ -392,7 +407,7 @@ async def analyze_video_upload(
     # OpenPose-style skeleton overlay video (original resolution/FPS, H.264)
     try:
         pose_out = OUTPUT_DIR / f"pose_{file_id}.mp4"
-        analyze_pose_overlay(str(saved_path), str(pose_out), ball_positions=ball_positions)
+        analyze_pose_overlay(str(processing_path), str(pose_out), ball_positions=ball_positions)
         result.pose_video_url = f"/outputs/{pose_out.name}"
     except Exception:
         pass  # pose overlay is best-effort; analysis result is still returned
@@ -401,7 +416,7 @@ async def analyze_video_upload(
     try:
         cricket_out = OUTPUT_DIR / f"cricket_{file_id}.mp4"
         report = analyze_cricket_shot(
-            str(saved_path), str(cricket_out),
+            str(processing_path), str(cricket_out),
             shot_direction=None, batter_hand=batter_hand,
         )
         result.cricket_video_url = f"/outputs/{cricket_out.name}"
@@ -410,6 +425,9 @@ async def analyze_video_upload(
         result.ball_tracking = report.get("ball_tracking")
     except Exception:
         pass  # cricket analysis is best-effort; rest of the result is still returned
+
+    # Add normalized video URL for frontend playback
+    result.video_url = f"/uploads/{processing_path.name}"
 
     return result
 
@@ -537,3 +555,65 @@ async def websocket_live_stream(websocket: WebSocket):
             })
     except WebSocketDisconnect:
         pass
+
+
+@app.get("/api/videos/{video_id}")
+async def serve_video(video_id: str, range: Optional[str] = None):
+    """
+    Serve a normalized upload video with HTTP Range support so the browser
+    can seek. Looks for the file in backend/uploads/ by exact filename or
+    by the <file_id> prefix used in upload_<file_id>.mp4 / fixed_<file_id>.mp4.
+    """
+    upload_dir = Path(UPLOAD_DIR)
+
+    # Try exact filename first, then prefix match
+    candidates: list[Path] = []
+    exact = upload_dir / video_id
+    if exact.exists():
+        candidates.append(exact)
+    else:
+        for p in upload_dir.iterdir():
+            if p.is_file() and p.name.startswith(f"{video_id}_") or p.name.startswith(f"upload_{video_id}") or p.name.startswith(f"fixed_{video_id}"):
+                candidates.append(p)
+
+    if not candidates:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    video_path = candidates[0]
+    file_size = video_path.stat().st_size
+
+    # Parse Range header
+    start = 0
+    end = file_size - 1
+    if range:
+        match = re.match(r"bytes=(\d+)-(\d*)", range)
+        if match:
+            start = int(match.group(1))
+            if match.group(2):
+                end = int(match.group(2))
+            end = min(end, file_size - 1)
+
+    if start > end or start >= file_size:
+        raise HTTPException(status_code=416, detail="Requested range not satisfiable")
+
+    length = end - start + 1
+
+    def iter_file():
+        with open(video_path, "rb") as f:
+            f.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = f.read(min(65536, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Range": f"bytes {start}-{end}/{file_size}",
+        "Content-Length": str(length),
+        "Content-Type": "video/mp4",
+    }
+    status = 206 if range else 200
+    return StreamingResponse(iter_file(), status=status, headers=headers)

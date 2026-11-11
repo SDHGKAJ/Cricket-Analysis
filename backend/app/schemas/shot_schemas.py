@@ -32,6 +32,7 @@ class ShotAnalysisResponse(BaseModel):
     feedback: List[str] = []
     ball_tracking: Optional[Dict[str, Any]] = None
     frames: List[FrameLandmarks] = []
+    video_url: Optional[str] = None
 
 class LandmarkPoint(BaseModel):
     x: float

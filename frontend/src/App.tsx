@@ -322,7 +322,7 @@ export const App: React.FC = () => {
                     ))}
                   </div>
                   <div className="panel p-8 text-center text-[#6E7486] text-sm">
-                    Analyzing your shot — please wait…
+                    Converting video and running analysis — please wait…
                   </div>
                 </>
               )}
@@ -425,7 +425,28 @@ export const App: React.FC = () => {
                           />
                         </section>
                       )}
-                      {!activeShot.pose_video_url && previewUrl && (
+                      {!activeShot.pose_video_url && activeShot.video_url && (
+                        <section className="panel p-4 flex flex-col gap-3 fade-in">
+                          <div className="flex items-center justify-between">
+                            <h3 className="text-xs font-bold text-[#FFFFFF] uppercase tracking-wider">Pose overlay</h3>
+                            <span className="text-[10px] text-[#6E7486] font-numeric">MediaPipe · 33 landmarks · normalized video</span>
+                          </div>
+                          <VideoPlayer
+                            src={activeShot.video_url}
+                            landmarks={activeShot.frames}
+                            showSkeleton={showSkeleton}
+                            totalFrames={activeShot.total_frames ?? 0}
+                            currentTimeMs={currentTimeMs}
+                            onSeekTime={setCurrentTimeMs}
+                            playbackRate={playbackRate}
+                            onRateChange={setPlaybackRate}
+                            playing={playing}
+                            onTogglePlay={() => setPlaying((p) => !p)}
+                            onVideoEnded={() => setPlaying(false)}
+                          />
+                        </section>
+                      )}
+                      {!activeShot.pose_video_url && !activeShot.video_url && previewUrl && (
                         <section className="panel p-4 flex flex-col gap-3 fade-in">
                           <div className="flex items-center justify-between">
                             <h3 className="text-xs font-bold text-[#FFFFFF] uppercase tracking-wider">Pose overlay</h3>
@@ -470,7 +491,28 @@ export const App: React.FC = () => {
                           />
                         </section>
                       )}
-                      {!activeShot.cricket_video_url && previewUrl && !activeShot.pose_video_url && (
+                      {!activeShot.cricket_video_url && activeShot.video_url && !activeShot.pose_video_url && (
+                        <section className="panel p-4 flex flex-col gap-3 fade-in">
+                          <div className="flex items-center justify-between">
+                            <h3 className="text-xs font-bold text-[#FFFFFF] uppercase tracking-wider">Shot analysis (HUD)</h3>
+                            <span className="text-[10px] text-[#6E7486] font-numeric">Weight · contact · phases</span>
+                          </div>
+                          <VideoPlayer
+                            src={activeShot.video_url}
+                            landmarks={activeShot.frames}
+                            showSkeleton={showSkeleton}
+                            totalFrames={activeShot.total_frames ?? 0}
+                            currentTimeMs={currentTimeMs}
+                            onSeekTime={setCurrentTimeMs}
+                            playbackRate={playbackRate}
+                            onRateChange={setPlaybackRate}
+                            playing={playing}
+                            onTogglePlay={() => setPlaying((p) => !p)}
+                            onVideoEnded={() => setPlaying(false)}
+                          />
+                        </section>
+                      )}
+                      {!activeShot.cricket_video_url && !activeShot.video_url && previewUrl && !activeShot.pose_video_url && (
                         <section className="panel p-4 flex flex-col gap-3 fade-in">
                           <div className="flex items-center justify-between">
                             <h3 className="text-xs font-bold text-[#FFFFFF] uppercase tracking-wider">Shot analysis (HUD)</h3>
@@ -494,7 +536,7 @@ export const App: React.FC = () => {
                           </p>
                         </section>
                       )}
-                      {!activeShot.pose_video_url && !activeShot.cricket_video_url && !previewUrl && (
+                      {!activeShot.pose_video_url && !activeShot.cricket_video_url && !activeShot.video_url && !previewUrl && (
                         <div className="panel p-12 text-center">
                           <span className="text-[12px] text-[#6E7486]">No video available.</span>
                         </div>
