@@ -3,6 +3,7 @@ import { UploadCloud, FileVideo, X } from 'lucide-react';
 
 interface UploadDropzoneProps {
   onFiles: (files: FileList) => void;
+  onPreviewUrl?: (url: string | null) => void;
   disabled?: boolean;
   error?: string | null;
   setError: (err: string | null) => void;
@@ -32,6 +33,7 @@ function validateFile(file: File): string | null {
  */
 export const UploadDropzone: React.FC<UploadDropzoneProps> = ({
   onFiles,
+  onPreviewUrl,
   disabled = false,
   error,
   setError,
@@ -65,7 +67,9 @@ export const UploadDropzone: React.FC<UploadDropzoneProps> = ({
       const err = validateFile(file);
       if (err) { setError(err); return; }
       setSelectedFile(file);
-      setPreviewUrl(URL.createObjectURL(file));
+      const url = URL.createObjectURL(file);
+      setPreviewUrl(url);
+      onPreviewUrl?.(url);
       setError(null);
     },
     [setError]
@@ -162,6 +166,7 @@ export const UploadDropzone: React.FC<UploadDropzoneProps> = ({
               onClick={() => {
                 setSelectedFile(null);
                 setPreviewUrl(null);
+                onPreviewUrl?.(null);
                 URL.revokeObjectURL(previewUrl!);
               }}
               className="text-[#6E7486] hover:text-[#F4533F] underline underline-offset-1"

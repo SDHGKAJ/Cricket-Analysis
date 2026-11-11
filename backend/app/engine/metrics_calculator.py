@@ -102,6 +102,18 @@ class MetricsCalculator:
         Computes metric scores (0-10) and raw diagnostic measurements.
         """
         joints = self._resolve_joints()
+        if len(frames) == 0:
+            default_metrics = {
+                "timing": 7.0,
+                "head_position": 7.0,
+                "front_elbow": 7.0,
+                "footwork": 7.0,
+                "balance": 7.0,
+                "bat_swing_path": 7.0,
+                "backlift": 7.0,
+                "follow_through": 7.0
+            }
+            return default_metrics, {"error": "No frames available"}
         impact_idx = segmentation.get("impact_frame", len(frames) // 2)
         impact_idx = min(max(0, impact_idx), len(frames) - 1)
         impact_frame = frames[impact_idx]

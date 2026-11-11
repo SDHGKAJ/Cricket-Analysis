@@ -34,11 +34,13 @@ export const App: React.FC = () => {
   const [activeShot, setActiveShot] = useState<ShotAnalysis | null>(null);
   const [cricketReport, setCricketReport] = useState<CricketReport | null>(null);
   const [sessionId, setSessionId] = useState<string | undefined>();
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
   /* Video player state */
   const [playing, setPlaying] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [currentTimeMs, setCurrentTimeMs] = useState(0);
+  const [showSkeleton, setShowSkeleton] = useState(true);
 
   useEffect(() => {
     createBattingSession('Batter 01', cameraAngle, batterHand)
@@ -76,7 +78,7 @@ export const App: React.FC = () => {
     const t = setInterval(() => {
       setCurrentTimeMs((prev) => {
         const next = prev + 100;
-        if (next >= totalDurationMs) { setPlaying(false); return totalDurationMs; }
+        if (next >= totalDurationMs) return totalDurationMs;
         return next;
       });
     }, 100);
@@ -103,6 +105,7 @@ export const App: React.FC = () => {
     setAppState('empty');
     setActiveShot(null);
     setCricketReport(null);
+    setPreviewUrl(null);
     setErrorMessage('');
     setPlaying(false);
     setCurrentTimeMs(0);
@@ -125,6 +128,7 @@ export const App: React.FC = () => {
     if (err) { handleUploadError(err); return; }
     setAppState('processing');
     setErrorMessage('');
+    setPreviewUrl(null); // clear object URL preview once analysis starts
     uploadVideoShot(file, cameraAngle, batterHand, sessionId)
       .then(handleVideoComplete)
       .catch((e) => handleUploadError(e.message || 'Upload failed'));
@@ -236,10 +240,32 @@ export const App: React.FC = () => {
                   </div>
                   <UploadDropzone
                     onFiles={handleUpload}
+                    onPreviewUrl={setPreviewUrl}
                     disabled={isProcessing}
                     error={errorMessage}
                     setError={setErrorMessage}
                   />
+                  {previewUrl && (
+                    <section className="panel p-4 flex flex-col gap-3 fade-in">
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-xs font-bold text-[#FFFFFF] uppercase tracking-wider">Video preview</h3>
+                        <span className="text-[10px] text-[#6E7486] font-numeric">Select a clip to play</span>
+                      </div>
+                      <VideoPlayer
+                        src={previewUrl}
+                        landmarks={[]}
+                        showSkeleton={false}
+                        totalFrames={0}
+                        currentTimeMs={currentTimeMs}
+                        onSeekTime={setCurrentTimeMs}
+                        playbackRate={playbackRate}
+                        onRateChange={setPlaybackRate}
+                        playing={playing}
+                        onTogglePlay={() => setPlaying((p) => !p)}
+                        onVideoEnded={() => setPlaying(false)}
+                      />
+                    </section>
+                  )}
                 </>
               )}
 
@@ -294,20 +320,8 @@ export const App: React.FC = () => {
                       </div>
                     ))}
                   </div>
-                  <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-4">
-                    {[1, 2, 3, 4].map((i) => (
-                      <div key={i} className="panel p-4 flex flex-col gap-2 min-h-[200px]">
-                        <div className="flex gap-2">
-                          <div className="skeleton h-4 w-1/3" />
-                          <div className="skeleton h-4 w-1/2" />
-                        </div>
-                        <div className="flex-1">
-                          <div className="skeleton h-20 w-full mb-2" />
-                          <div className="skeleton h-4 w-3/4" />
-                          <div className="skeleton h-4 w-1/2" />
-                        </div>
-                      </div>
-                    ))}
+                  <div className="panel p-8 text-center text-[#6E7486] text-sm">
+                    Analyzing your shot — please wait…
                   </div>
                 </>
               )}
@@ -373,14 +387,31 @@ export const App: React.FC = () => {
                   <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
                     {/* Left: videos (7 cols) */}
                     <div className="lg:col-span-7 space-y-4">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[11px] font-semibold text-[#AAB0BD] uppercase tracking-wider">Skeleton overlay</span>
+                        <button
+                          onClick={() => setShowSkeleton((s) => !s)}
+                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[8px] text-[10px] font-bold border ${
+                            showSkeleton
+                              ? 'bg-[#1FB5D6] text-[#052E16] border-[#1FB5D6]'
+                              : 'border-[rgba(255,255,255,0.08)] text-[#6E7486] bg-[#242833] hover:bg-[#3A3F4E]'
+                          }`}
+                          aria-pressed={showSkeleton}
+                        >
+                          <span className="w-3 h-3 rounded-full bg-[#052E16]"></span>
+                          {showSkeleton ? 'ON' : 'OFF'}
+                        </button>
+                      </div>
                       {activeShot.pose_video_url && (
                         <section className="panel p-4 flex flex-col gap-3 fade-in">
                           <div className="flex items-center justify-between">
                             <h3 className="text-xs font-bold text-[#FFFFFF] uppercase tracking-wider">Pose overlay</h3>
-                            <span className="text-[10px] text-[#6E7486] font-numeric">OpenPose-style · COCO-18</span>
+                            <span className="text-[10px] text-[#6E7486] font-numeric">MediaPipe · 33 landmarks</span>
                           </div>
                           <VideoPlayer
                             src={activeShot.pose_video_url}
+                            landmarks={activeShot.frames}
+                            showSkeleton={showSkeleton}
                             totalFrames={activeShot.total_frames ?? 0}
                             currentTimeMs={currentTimeMs}
                             onSeekTime={setCurrentTimeMs}
@@ -388,6 +419,7 @@ export const App: React.FC = () => {
                             onRateChange={setPlaybackRate}
                             playing={playing}
                             onTogglePlay={() => setPlaying((p) => !p)}
+                            onVideoEnded={() => setPlaying(false)}
                           />
                         </section>
                       )}
@@ -399,6 +431,8 @@ export const App: React.FC = () => {
                           </div>
                           <VideoPlayer
                             src={activeShot.cricket_video_url}
+                            landmarks={activeShot.frames}
+                            showSkeleton={showSkeleton}
                             totalFrames={activeShot.total_frames ?? 0}
                             currentTimeMs={currentTimeMs}
                             onSeekTime={setCurrentTimeMs}
@@ -406,6 +440,7 @@ export const App: React.FC = () => {
                             onRateChange={setPlaybackRate}
                             playing={playing}
                             onTogglePlay={() => setPlaying((p) => !p)}
+                            onVideoEnded={() => setPlaying(false)}
                           />
                         </section>
                       )}

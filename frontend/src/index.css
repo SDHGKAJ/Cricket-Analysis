@@ -160,12 +160,6 @@
     color: var(--text-mute);
   }
 
-  /* Skeleton loader */
-  .skeleton {
-    background-color: #3A3F4E;
-    border-radius: var(--r-badge);
-    animation: pulseSoft 1.6s ease-in-out infinite;
-  }
 
   .btn {
     display: inline-flex;

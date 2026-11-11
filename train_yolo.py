@@ -13,6 +13,9 @@ print(f"GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N
 data_yaml = Path("Cricket-Ball-Detection-1/data.yaml").resolve()
 print(f"\nData YAML: {data_yaml}")
 print(f"Exists: {data_yaml.exists()}")
+if not data_yaml.exists():
+    print(f"\nERROR: {data_yaml} not found. Dataset moved to _old_ball_model_backup/Cricket-Ball-Detection-1/")
+    sys.exit(1)
 
 # NOTE: This Roboflow dataset only has 3 images in train/ and no valid/ dir.
 # We'll point val to train so YOLOv8 can run (minimal dataset - for testing only).

@@ -1,6 +1,8 @@
-import React from 'react';
-import { ArrowRight, FileText, RefreshCw, User } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { ArrowRight, FileText, RefreshCw, User, RotateCcw } from 'lucide-react';
 import { FeedbackItem } from '../services/reportMapper';
+import { SessionRecord } from '../types/cricket';
+import { getBattingSessions } from '../services/api';
 
 interface FeedbackRowProps {
   item: FeedbackItem;
@@ -26,11 +28,24 @@ export interface FeedbackPanelProps {
 }
 
 export const FeedbackPanel: React.FC<FeedbackPanelProps> = ({ items }) => {
-  const recent = [
-    { id: 'r1', title: 'Cover Drive · 4 Jun', detail: 'Overall 8.2 · Head balanced', time: '2h ago' },
-    { id: 'r2', title: 'Straight Drive · 3 Jun', detail: 'Overall 6.9 · Front foot late', time: '1d ago' },
-    { id: 'r3', title: 'Pull Shot · 1 Jun', detail: 'Overall 5.4 · Early contact', time: '2d ago' },
-  ];
+  const [sessions, setSessions] = useState<SessionRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getBattingSessions()
+      .then((data) => { if (!cancelled) { setSessions(data); setLoading(false); } })
+      .catch((err) => { if (!cancelled) { setError(err.message); setLoading(false); } });
+    return () => { cancelled = true; };
+  }, []);
+
+  const recent = sessions.map((s) => ({
+    id: s.id,
+    title: `${s.shot_count} shots · ${s.camera_angle.replace('_', ' ')}`,
+    detail: `Overall ${s.avg_score?.toFixed(1) ?? '—'}/10 · ${s.batter_hand}`,
+    time: s.created_at ? new Date(s.created_at).toLocaleDateString() : '—',
+  }));
 
   return (
     <aside className="flex flex-col gap-4 fade-in" aria-label="Right panel">
@@ -65,18 +80,31 @@ export const FeedbackPanel: React.FC<FeedbackPanelProps> = ({ items }) => {
           <h3 className="text-xs font-bold text-[#FFFFFF] uppercase tracking-wider">Recent analyses</h3>
         </div>
         <div className="space-y-2">
-          {recent.map((r) => (
-            <div key={r.id} className="flex items-center gap-2.5 p-2 rounded-[8px] border border-[rgba(255,255,255,0.04)] hover:border-[#1FB5D6]/50 transition-colors group">
-              <div className="w-7 h-7 rounded-[6px] bg-[#1FB5D6]/15 flex items-center justify-center text-[#1FB5D6] shrink-0">
-                <User className="w-3 h-3" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-[12px] font-semibold text-[#FFFFFF] truncate">{r.title}</p>
-                <p className="text-[11px] text-[#6E7486] truncate">{r.detail}</p>
-              </div>
-              <span className="text-[10px] text-[#6E7486] font-numeric">{r.time}</span>
+          {loading ? (
+            <div className="flex items-center gap-2 p-2 text-[12px] text-[#6E7486]">
+              <RotateCcw className="w-3 h-3 animate-spin" />
+              <span>Loading…</span>
             </div>
-          ))}
+          ) : error ? (
+            <div className="flex items-center gap-2 p-2 rounded-[8px] border border-[#F4533F]/30 bg-[#F4533F]/10 text-[12px] text-[#F4533F]">
+              <span>Unable to load recent analyses</span>
+            </div>
+          ) : sessions.length === 0 ? (
+            <p className="text-[12px] text-[#6E7486] text-center py-4">No recent analyses yet.</p>
+          ) : (
+            recent.map((r) => (
+              <div key={r.id} className="flex items-center gap-2.5 p-2 rounded-[8px] border border-[rgba(255,255,255,0.04)] hover:border-[#1FB5D6]/50 transition-colors group">
+                <div className="w-7 h-7 rounded-[6px] bg-[#1FB5D6]/15 flex items-center justify-center text-[#1FB5D6] shrink-0">
+                  <User className="w-3 h-3" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-[12px] font-semibold text-[#FFFFFF] truncate">{r.title}</p>
+                  <p className="text-[11px] text-[#6E7486] truncate">{r.detail}</p>
+                </div>
+                <span className="text-[10px] text-[#6E7486] font-numeric">{r.time}</span>
+              </div>
+            ))
+          )}
         </div>
       </section>
     </aside>
