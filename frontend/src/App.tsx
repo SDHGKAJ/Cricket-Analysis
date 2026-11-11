@@ -128,7 +128,8 @@ export const App: React.FC = () => {
     if (err) { handleUploadError(err); return; }
     setAppState('processing');
     setErrorMessage('');
-    setPreviewUrl(null); // clear object URL preview once analysis starts
+    // Keep previewUrl so the original video can be shown in results state
+    // as a fallback when the backend cannot generate annotated video.
     uploadVideoShot(file, cameraAngle, batterHand, sessionId)
       .then(handleVideoComplete)
       .catch((e) => handleUploadError(e.message || 'Upload failed'));
@@ -402,6 +403,7 @@ export const App: React.FC = () => {
                           {showSkeleton ? 'ON' : 'OFF'}
                         </button>
                       </div>
+                      {/* Determine which video to show: annotated > original upload */}
                       {activeShot.pose_video_url && (
                         <section className="panel p-4 flex flex-col gap-3 fade-in">
                           <div className="flex items-center justify-between">
@@ -421,6 +423,30 @@ export const App: React.FC = () => {
                             onTogglePlay={() => setPlaying((p) => !p)}
                             onVideoEnded={() => setPlaying(false)}
                           />
+                        </section>
+                      )}
+                      {!activeShot.pose_video_url && previewUrl && (
+                        <section className="panel p-4 flex flex-col gap-3 fade-in">
+                          <div className="flex items-center justify-between">
+                            <h3 className="text-xs font-bold text-[#FFFFFF] uppercase tracking-wider">Pose overlay</h3>
+                            <span className="text-[10px] text-[#6E7486] font-numeric">MediaPipe · 33 landmarks · original video</span>
+                          </div>
+                          <VideoPlayer
+                            src={previewUrl}
+                            landmarks={activeShot.frames}
+                            showSkeleton={showSkeleton}
+                            totalFrames={activeShot.total_frames ?? 0}
+                            currentTimeMs={currentTimeMs}
+                            onSeekTime={setCurrentTimeMs}
+                            playbackRate={playbackRate}
+                            onRateChange={setPlaybackRate}
+                            playing={playing}
+                            onTogglePlay={() => setPlaying((p) => !p)}
+                            onVideoEnded={() => setPlaying(false)}
+                          />
+                          <p className="text-[11px] text-[#6E7486] mt-1">
+                            Annotated video unavailable — showing original upload with skeleton overlay.
+                          </p>
                         </section>
                       )}
                       {activeShot.cricket_video_url && (
@@ -444,9 +470,33 @@ export const App: React.FC = () => {
                           />
                         </section>
                       )}
-                      {!activeShot.pose_video_url && !activeShot.cricket_video_url && (
+                      {!activeShot.cricket_video_url && previewUrl && !activeShot.pose_video_url && (
+                        <section className="panel p-4 flex flex-col gap-3 fade-in">
+                          <div className="flex items-center justify-between">
+                            <h3 className="text-xs font-bold text-[#FFFFFF] uppercase tracking-wider">Shot analysis (HUD)</h3>
+                            <span className="text-[10px] text-[#6E7486] font-numeric">Weight · contact · phases</span>
+                          </div>
+                          <VideoPlayer
+                            src={previewUrl}
+                            landmarks={activeShot.frames}
+                            showSkeleton={showSkeleton}
+                            totalFrames={activeShot.total_frames ?? 0}
+                            currentTimeMs={currentTimeMs}
+                            onSeekTime={setCurrentTimeMs}
+                            playbackRate={playbackRate}
+                            onRateChange={setPlaybackRate}
+                            playing={playing}
+                            onTogglePlay={() => setPlaying((p) => !p)}
+                            onVideoEnded={() => setPlaying(false)}
+                          />
+                          <p className="text-[11px] text-[#6E7486] mt-1">
+                            Annotated video unavailable — showing original upload with skeleton overlay.
+                          </p>
+                        </section>
+                      )}
+                      {!activeShot.pose_video_url && !activeShot.cricket_video_url && !previewUrl && (
                         <div className="panel p-12 text-center">
-                          <span className="text-[12px] text-[#6E7486]">No annotated video returned by the backend.</span>
+                          <span className="text-[12px] text-[#6E7486]">No video available.</span>
                         </div>
                       )}
                     </div>

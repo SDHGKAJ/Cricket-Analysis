@@ -99,6 +99,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [isPaused, setIsPaused] = useState(true);
   const [vidW, setVidW] = useState(0);
   const [vidH, setVidH] = useState(0);
+  const [videoError, setVideoError] = useState<string | null>(null);
   /** true when currentTimeMs change came from a user scrub (scrubber / step) → needs a video seek */
   const isUserSeek = useRef(false);
 
@@ -267,10 +268,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     [currentTimeMs, totalFrames, onSeekTime]
   );
 
-  if (!src) {
+  if (!src || videoError) {
     return (
       <div className={`flex items-center justify-center h-64 rounded-[16px] bg-[#242833] border border-[rgba(255,255,255,0.04)] ${className}`}>
-        <span className="text-[12px] text-[#6E7486]">No video</span>
+        <span className={`text-[12px] ${videoError ? 'text-[#F4533F]' : 'text-[#6E7486]'}`}>
+          {videoError || 'No video'}
+        </span>
       </div>
     );
   }
@@ -290,6 +293,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
           onPause={handlePause}
           onPlay={handlePlay}
           onEnded={handleEnded}
+          onError={() => setVideoError('Unsupported video format — use H.264 MP4')}
           className="w-full h-full object-contain"
           aria-label="Shot video"
         />
