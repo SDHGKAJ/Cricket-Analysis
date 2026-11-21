@@ -36,14 +36,34 @@ ROBOFLOW_DATASETS = {
         "classes": ["bat"],
         "url": "https://universe.roboflow.com/lbwdrs/cricket-bat-detection-hlbdq"
     },
-    "cricket_ball": {
+    # Single-class cricket-ball datasets (all CC BY 4.0). These are merged by
+    # build_ball_dataset() into one YOLO dataset with class 0 = cricket_ball.
+    # (The old learningplatform/cricket-ball-detection-4g7e0 had only 3 unlabelled
+    # images and produced a useless model — do not use it.)
+    "ball_red_white": {
+        "workspace": "ball-speed",
+        "project": "red-and-white-ball",
+        "version": 3,
+        "classes": ["Cricket Ball"],
+        "url": "https://universe.roboflow.com/ball-speed/red-and-white-ball"
+    },
+    "ball_learningplatform": {
         "workspace": "learningplatform",
-        "project": "cricket-ball-detection-4g7e0",
+        "project": "cricket-ball-detection-rixg7",
         "version": 1,
-        "classes": ["ball"],
-        "url": "https://universe.roboflow.com/learningplatform/cricket-ball-detection-4g7e0"
-    }
+        "classes": ["cricketball"],
+        "url": "https://universe.roboflow.com/learningplatform/cricket-ball-detection-rixg7"
+    },
+    "ball_rajyavardhan": {
+        "workspace": "rajyavardhan-singh-oygkv",
+        "project": "cricket-ball-detection-our4k",
+        "version": 1,
+        "classes": ["Cricket Ball Detection"],
+        "url": "https://universe.roboflow.com/rajyavardhan-singh-oygkv/cricket-ball-detection-our4k"
+    },
 }
+
+BALL_DATASET_KEYS = ["ball_red_white", "ball_learningplatform", "ball_rajyavardhan"]
 
 
 class RoboflowCricketLoader:
@@ -104,8 +124,60 @@ class RoboflowCricketLoader:
     def list_available_targets() -> Dict[str, Any]:
         return ROBOFLOW_DATASETS
 
+    def build_ball_dataset(self, out_dir: Optional[str] = None) -> Path:
+        """Download every BALL_DATASET_KEYS source and merge them into one
+        single-class YOLO dataset (class 0 = cricket_ball). Returns data.yaml path.
+
+        Source splits are kept (train/valid/test) so no source image leaks from
+        train into validation. Every label's class id is rewritten to 0.
+        """
+        import shutil
+
+        out = Path(out_dir or self.base_dir / "ball_merged")
+        for split in ("train", "valid", "test"):
+            (out / split / "images").mkdir(parents=True, exist_ok=True)
+            (out / split / "labels").mkdir(parents=True, exist_ok=True)
+
+        counts: Dict[str, int] = {"train": 0, "valid": 0, "test": 0}
+        for key in BALL_DATASET_KEYS:
+            src = self.base_dir / key
+            if not (src / "data.yaml").exists():
+                res = self.download_dataset(key)
+                if res.get("status") != "success":
+                    raise RuntimeError(f"Download failed for {key}: {res}")
+            for split in ("train", "valid", "test"):
+                img_dir = src / split / "images"
+                if not img_dir.exists():
+                    continue
+                for img in img_dir.iterdir():
+                    lbl = src / split / "labels" / (img.stem + ".txt")
+                    new_stem = f"{key}__{img.stem}"
+                    shutil.copy2(img, out / split / "images" / (new_stem + img.suffix))
+                    lines = []
+                    if lbl.exists():
+                        for line in lbl.read_text().splitlines():
+                            parts = line.split()
+                            # keep plain bounding boxes only (cls cx cy w h)
+                            if len(parts) == 5:
+                                lines.append(" ".join(["0"] + parts[1:]))
+                    (out / split / "labels" / (new_stem + ".txt")).write_text("\n".join(lines))
+                    counts[split] += 1
+
+        data_yaml = out / "data.yaml"
+        data_yaml.write_text(
+            f"path: {out.resolve().as_posix()}\n"
+            "train: train/images\nval: valid/images\ntest: test/images\n"
+            "nc: 1\nnames: ['cricket_ball']\n"
+        )
+        logger.info(f"Merged ball dataset at {out}: {counts}")
+        return data_yaml
+
 
 if __name__ == "__main__":
     loader = RoboflowCricketLoader()
-    print("Available Roboflow datasets for Cricket CV:")
-    print(RoboflowCricketLoader.list_available_targets())
+    if len(sys.argv) > 1 and sys.argv[1] == "ball":
+        print(loader.build_ball_dataset())
+    else:
+        print("Available Roboflow datasets for Cricket CV:")
+        print(RoboflowCricketLoader.list_available_targets())
+        print("\nRun `python backend/datasets/roboflow_loader.py ball` to build the merged ball dataset.")

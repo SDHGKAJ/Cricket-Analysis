@@ -78,3 +78,8 @@ backend/shot_features/
 
 # Training outputs & runs
 runs/
+
+# Downloaded datasets
+data/
+# Disabled model weights kept locally for rollback
+*.broken.bak

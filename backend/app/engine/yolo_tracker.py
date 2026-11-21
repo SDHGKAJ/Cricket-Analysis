@@ -22,14 +22,8 @@ from ..config import BASE_DIR
 DEFAULT_MODEL_PATH = str(BASE_DIR / "cricket_yolo.onnx")
 
 # Prefer the custom-trained PyTorch cricket-ball model if it was trained.
-CUSTOM_PT_MODEL = str(
-    BASE_DIR.parent
-    / "runs"
-    / "detect"
-    / "cricket_ball_yolov8-2"
-    / "weights"
-    / "best.pt"
-)
+# Written by train_yolo.py after training on the merged Roboflow ball dataset.
+CUSTOM_PT_MODEL = str(BASE_DIR / "models" / "cricket_ball.pt")
 
 # COCO "sports ball" class id (fallback only)
 COCO_SPORTS_BALL_CLASS = 32
@@ -64,6 +58,9 @@ class CricketBallTracker:
         self.model = None
         self.use_custom_pt = False
         self.model_path = model_path or self._pick_model()
+        # Only the stock COCO model needs filtering to class 32 ("sports ball");
+        # custom cricket-ball models (.pt or .onnx) are single-class.
+        self.is_coco = Path(self.model_path).name == "yolov8n.pt"
         self.conf = conf
         self.imgsz = imgsz
         self.device = device or ("0" if _torch.cuda.is_available() else "cpu")
@@ -174,7 +171,7 @@ class CricketBallTracker:
             if c < conf:
                 continue
             # For COCO fallback, only keep sports-ball class
-            if not self.use_custom_pt and clses[i] != COCO_SPORTS_BALL_CLASS:
+            if self.is_coco and clses[i] != COCO_SPORTS_BALL_CLASS:
                 continue
             if best is None or c > best[0]:
                 best = (c, i)
@@ -213,6 +210,9 @@ class CricketObjectTracker:
 
     def __init__(self, model_path: Optional[str] = None):
         self.model_path = model_path or DEFAULT_MODEL_PATH
+        # Don't report a model that isn't there (the ball report shows this name).
+        if not Path(self.model_path).exists():
+            self.model_path = "none (colour-blob only)"
         self.yolo_model = None
         self.ball_tracker = CricketBallTracker(model_path=model_path)
         self._init_detector()
