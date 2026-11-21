@@ -61,6 +61,8 @@ export interface ShotAnalysis {
   pose_video_url?: string;
   cricket_video_url?: string;
   cricket_report_url?: string;
+  /** Hawk-Eye trajectory JSON (see types/trajectory.ts) */
+  trajectory_url?: string;
   feedback?: string[];
   ball_tracking?: BallTrackingReport;
   confidence?: number;
@@ -132,6 +134,7 @@ export interface BallContactReport {
   frame: number | null;
   time_ms: number | null;
   method: string | null;
+  confidence?: 'high' | 'medium' | 'low';
 }
 
 export interface EyeFocusReport {
@@ -258,6 +261,7 @@ export interface BallContactReport {
   frame: number | null;
   time_ms: number | null;
   method: string | null;
+  confidence?: 'high' | 'medium' | 'low';
 }
 
 export interface EyeFocusReport {

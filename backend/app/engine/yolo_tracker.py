@@ -540,7 +540,8 @@ class CricketObjectTracker:
             and Path(video_path).exists()
         )
 
-        yolo_balls: Dict[int, List[float]] = {}
+        yolo_balls: Dict[int, List[float]] = {}       # frame -> [x_norm, y_norm]
+        yolo_conf: Dict[int, float] = {}              # frame -> detector confidence
         if use_yolo:
             try:
                 import cv2
@@ -554,10 +555,11 @@ class CricketObjectTracker:
                     if not ret:
                         break
                     # One gated call per frame (YOLO + colour blob, static/track gates)
-                    ball = self._detect_ball_yolo(cv_frame)
+                    ball = self._detect_ball_yolo_with_conf(cv_frame)
                     if ball is not None:
                         # store normalized [0..1] for the FrameLandmarks schema
                         yolo_balls[idx] = [ball[0] / y_w, ball[1] / y_h]
+                        yolo_conf[idx] = float(ball[2])
                     idx += 1
                 cap.release()
             except Exception:
@@ -585,6 +587,7 @@ class CricketObjectTracker:
             # Gated detections first; the ungated ByteTrack pass is only a fallback
             if yolo_balls.get(i) is not None:
                 ball_pos = yolo_balls[i]
+                ball_meta = {"conf": yolo_conf.get(i)}
             elif i in byte_balls:
                 ball_pos = byte_balls[i].get("ball_pos")
                 ball_meta = {

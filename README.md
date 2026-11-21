@@ -227,6 +227,51 @@ Open your browser at `http://localhost:5173`.
 
 ---
 
+## 🎾 Hawk-Eye Trajectory
+
+Built on top of the existing ball detector (no retraining). Every `/api/analyze-video`
+call writes `backend/outputs/trajectory_<id>.json` ([schema](docs/trajectory_schema.json))
+and returns its URL as `trajectory_url`. In the UI, open the **Hawk-Eye** tab on the video.
+
+**Pipeline** (`backend/app/engine/trajectory.py`): drop detections with confidence < 0.4 →
+Hampel outlier filter → interpolate gaps ≤ 5 frames → Savitzky-Golay smoothing → bounce =
+split where two ballistic curves fit far better than one (a velocity sign flip side-on, a
+velocity *kink* from behind the bowler) → quadratic fit per segment → extrapolate to the
+stump plane → metrics.
+
+**What needs calibration.** One camera only sees image positions. The tube, bounce ring,
+trail and on-screen swing work from the video alone. Speed, length, line, the stump
+prediction, height at stumps, the decision and the 3D pitch view need a **pitch
+calibration**: pause on a clear frame, press *Calibrate pitch* and click
+
+1. batter's end bowling crease — left end, 2. right end
+3. bowler's end bowling crease — left end, 4. right end
+5. top of the middle stump at the batter's end
+
+The bounce point is then located exactly on the ground plane; speed and the post-bounce
+flight use stated assumptions (release 18.9 m out at 2.0 m high, 90% speed kept after the
+bounce), listed in the JSON `notes` and the panel's *How this was measured*. Without
+calibration those metrics are `null`, never guessed.
+
+**Decisions:** `HITTING` = ball centre inside the zone between the centres of the outer
+stumps and below the bails; `UMPIRE'S CALL` = not hitting but clipping the wicket (review
+retained); `MISSING` otherwise.
+
+```bash
+# rebuild a saved trajectory with a calibration file (video pixel coordinates)
+cd backend
+python -m app.engine.trajectory outputs/trajectory_<id>.json --calibration calib.json --write
+#   calib.json: {"batterEnd": [[x,y],[x,y]], "bowlerEnd": [[x,y],[x,y]], "stumpTop": [x,y]}
+
+# or over HTTP (what the UI does)
+curl -X POST localhost:8000/api/trajectory/<id> -H "Content-Type: application/json"      -d '{"calibration": {...}, "batterHand": "right"}'
+
+# tests (includes ground-truth deliveries projected through a pinhole camera)
+python -m pytest tests/test_trajectory.py -q
+```
+
+---
+
 ## 📹 Camera Perspectives & Calibration
 
 - **Front-On View (Default & Calibrated for MVP)**:

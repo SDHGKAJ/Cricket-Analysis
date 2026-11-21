@@ -220,9 +220,13 @@ function ballContactCard(r: CricketReport): MetricTileModel {
   base.value = `Frame ${frame.toFixed(0)}`;
   base.status = 'good';
   base.badge = 'Detected';
+  const how = m.method === 'audio+vision' ? 'bat crack heard with the ball at the bat'
+    : m.method === 'audio+swing' ? 'bat crack heard during the swing (ball not seen)'
+    : m.method ? m.method.replace(/_/g, ' ') : null;
   base.explanation =
     `Contact at ${time != null ? `${(time / 1000).toFixed(2)} s` : `frame ${frame.toFixed(0)}`}` +
-    (m.method ? ` · ${m.method.replace(/_/g, ' ')}.` : '.');
+    (how ? ` · ${how}.` : '.');
+  if (m.confidence) base.confidence = m.confidence[0].toUpperCase() + m.confidence.slice(1);
   return base;
 }
 

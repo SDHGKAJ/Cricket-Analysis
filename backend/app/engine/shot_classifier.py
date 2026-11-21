@@ -7,7 +7,7 @@ Supports:
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Optional, Tuple
 import math
 
 class BaseShotClassifier(ABC):
@@ -74,49 +74,60 @@ class RuleBasedShotClassifier(BaseShotClassifier):
         return "cover_drive", 0.94
 
 class MLShotClassifier(BaseShotClassifier):
-    def __init__(self, model_path: str = "cricket_shot_classifier.onnx"):
-        self.model_path = model_path
+    """ONNX shot-type model trained by train_shot_classifier.py (v2).
+
+    Uses app.engine.shot_features — the exact feature code used in training —
+    so the swing window, sampling and pose normalisation always match.
+    Returns ("", 0.0) rather than guessing when there is no compatible model
+    or the batter isn't visible enough; the UI then shows no shot type.
+    """
+
+    def __init__(self, model_path: Optional[str] = None):
+        from pathlib import Path
+        from ..config import BASE_DIR
+
+        self.model_path = Path(model_path) if model_path else BASE_DIR / "cricket_shot_classifier.onnx"
         self.session = None
+        self.classes: List[str] = []
+        self.reason = ""
         self._load_model()
 
-    def _load_model(self):
+    def _load_model(self) -> None:
+        import json
+        from .shot_features import FEATURE_VERSION
+
+        meta_path = self.model_path.with_suffix(".json")
+        if not self.model_path.exists() or not meta_path.exists():
+            self.reason = "no trained shot model (run train_shot_classifier.py)"
+            return
+        meta = json.loads(meta_path.read_text())
+        if meta.get("feature_version") != FEATURE_VERSION:
+            self.reason = f"shot model features v{meta.get('feature_version')} != v{FEATURE_VERSION}; retrain"
+            return
         try:
             import onnxruntime as ort
-            self.session = ort.InferenceSession(self.model_path)
-        except Exception:
+            self.session = ort.InferenceSession(str(self.model_path), providers=["CPUExecutionProvider"])
+            self.classes = list(meta["classes"])
+        except Exception as exc:  # pragma: no cover - environment specific
+            self.reason = f"could not load shot model: {exc}"
             self.session = None
 
-    def classify(self, frames: List[Dict[str, Any]], segmentation: Dict[str, Any], batter_hand: str = "right") -> Tuple[str, float]:
+    def classify(self, frames: List[Dict[str, Any]], segmentation: Dict[str, Any],
+                 batter_hand: str = "right") -> Tuple[str, float]:
         if self.session is None:
-            # Fallback to rule-based classifier if ONNX runtime or model file is unavailable
-            fallback = RuleBasedShotClassifier()
-            return fallback.classify(frames, segmentation, batter_hand)
+            return "", 0.0
+        import numpy as np
+        from .shot_features import features_from_api_frames
 
-        try:
-            import numpy as np
-            # Prepare feature sequence (1, 45, 99)
-            seq = []
-            for f in frames[:45]:
-                lm = f.get("landmarks", [])
-                coords = []
-                for pt in lm[:33]:
-                    coords.extend([pt.get("x", 0.0), pt.get("y", 0.0), pt.get("z", 0.0)])
-                while len(coords) < 99:
-                    coords.append(0.0)
-                seq.append(coords)
-            while len(seq) < 45:
-                seq.append([0.0] * 99)
+        feat = features_from_api_frames(frames)
+        if feat is None:
+            return "", 0.0
+        logits = self.session.run(None, {"x": feat[None]})[0][0]
+        p = np.exp(logits - logits.max())
+        p /= p.sum()
+        i = int(p.argmax())
+        return self.classes[i], round(float(p[i]), 3)
 
-            input_data = np.array([seq], dtype=np.float32)
-            inputs = {self.session.get_inputs()[0].name: input_data}
-            outputs = self.session.run(None, inputs)
-            logits = outputs[0][0]
-            classes = ["cover_drive", "cut_shot", "flick_shot", "forward_defense", "pull_shot", "straight_drive", "sweep_shot"]
-            pred_idx = int(np.argmax(logits))
-            confidence = float(np.max(np.exp(logits) / np.sum(np.exp(logits))))
-            return classes[pred_idx], round(confidence, 2)
-        except Exception:
-            return RuleBasedShotClassifier().classify(frames, segmentation, batter_hand)
 
 def get_shot_classifier(mode: str = "rule_based") -> BaseShotClassifier:
     if mode == "ml":

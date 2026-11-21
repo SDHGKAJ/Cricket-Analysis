@@ -119,7 +119,7 @@ def _ensure_model() -> Path:
 class _TasksPoseDetector:
     """MediaPipe Tasks PoseLandmarker (VIDEO mode) -> 33 landmarks per frame."""
 
-    def __init__(self) -> None:
+    def __init__(self, min_conf: float = 0.5) -> None:
         import cv2  # noqa: F401  (ensures OpenCV is importable before use)
         import mediapipe as mp
         from mediapipe.tasks import python as mp_python
@@ -129,9 +129,9 @@ class _TasksPoseDetector:
             base_options=mp_python.BaseOptions(model_asset_path=str(_ensure_model())),
             running_mode=vision.RunningMode.VIDEO,
             num_poses=1,
-            min_pose_detection_confidence=0.5,
-            min_pose_presence_confidence=0.5,
-            min_tracking_confidence=0.5,
+            min_pose_detection_confidence=min_conf,
+            min_pose_presence_confidence=min_conf,
+            min_tracking_confidence=min_conf,
         )
         self._mp = mp
         self._landmarker = vision.PoseLandmarker.create_from_options(options)
@@ -184,14 +184,14 @@ class _LegacyPoseDetector:
         self._pose.close()
 
 
-def create_pose_detector():
+def create_pose_detector(min_conf: float = 0.5):
     """Build the best available pose detector; None if mediapipe is unusable.
 
     Returns an object with .detect(frame_bgr, timestamp_ms) -> landmarks | None
     and .close().
     """
     try:
-        return _TasksPoseDetector()
+        return _TasksPoseDetector(min_conf)
     except Exception:
         pass
     try:

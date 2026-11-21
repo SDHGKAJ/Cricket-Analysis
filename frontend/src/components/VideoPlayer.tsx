@@ -27,6 +27,11 @@ interface VideoPlayerProps {
   landmarks?: FrameLandmarks[];
   showSkeleton?: boolean;
   autoPlay?: boolean;
+  /** Extra drawing on top of the video, called every animation frame.
+   *  (ctx, videoWidth, videoHeight, currentTimeMs) — coordinates are video pixels. */
+  overlay?: (ctx: CanvasRenderingContext2D, w: number, h: number, timeMs: number) => void;
+  /** When set, clicking the video reports the point (video pixels) instead of play/pause. */
+  onFrameClick?: (x: number, y: number) => void;
 }
 
 const SPEEDS = [0.25, 0.5, 1];
@@ -87,6 +92,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   landmarks,
   showSkeleton = false,
   autoPlay = true,
+  overlay,
+  onFrameClick,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -110,6 +117,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (canvas.width !== w) canvas.width = w;
     if (canvas.height !== h) canvas.height = h;
     ctx.clearRect(0, 0, w, h);
+    if (overlay) {
+      ctx.save();
+      overlay(ctx, w, h, video.currentTime * 1000);
+      ctx.restore();
+    }
     if (!showSkeleton || !landmarks?.length) return;
 
     const fr = nearestFrame(landmarks, video.currentTime * 1000);
@@ -152,7 +164,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       ctx.fillStyle = '#F3F5F8';
       ctx.fillText(text, x, y);
     }
-  }, [landmarks, showSkeleton]);
+  }, [landmarks, showSkeleton, overlay]);
 
   const report = useCallback((force = false) => {
     const video = videoRef.current;
@@ -214,6 +226,18 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (autoPlay) video.play().catch(() => {});
   };
 
+  /** Map a click on the (aspect-matched) video element to video pixel coordinates. */
+  const handleFrameClick = (e: React.MouseEvent<HTMLVideoElement>) => {
+    const video = videoRef.current;
+    if (!video || !onFrameClick || !video.videoWidth) return;
+    const r = video.getBoundingClientRect();
+    onFrameClick(
+      ((e.clientX - r.left) / r.width) * video.videoWidth,
+      ((e.clientY - r.top) / r.height) * video.videoHeight,
+    );
+    drawOverlay();
+  };
+
   const togglePlay = () => {
     const video = videoRef.current;
     if (!video) return;
@@ -272,12 +296,12 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
                 onEnded={() => setPaused(true)}
                 onSeeked={() => { drawOverlay(); report(true); }}
                 onError={() => setError('This video could not be played. Try an H.264 MP4.')}
-                onClick={togglePlay}
-                className="absolute inset-0 w-full h-full cursor-pointer"
+                onClick={onFrameClick ? handleFrameClick : togglePlay}
+                className={`absolute inset-0 w-full h-full ${onFrameClick ? 'cursor-crosshair' : 'cursor-pointer'}`}
                 aria-label="Shot video — click to play or pause"
               />
               <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" aria-hidden="true" />
-              {paused && (
+              {paused && !onFrameClick && (
                 <button
                   onClick={togglePlay}
                   className="absolute inset-0 m-auto w-16 h-16 rounded-full bg-black/55 backdrop-blur flex items-center justify-center text-white border border-white/20"

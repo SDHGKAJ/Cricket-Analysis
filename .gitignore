@@ -75,6 +75,7 @@ Thumbs.db
 # Dataset & extracted features
 Cricket-Ball-Detection-1/
 backend/shot_features/
+backend/shot_features_v2/
 
 # Training outputs & runs
 runs/
@@ -83,3 +84,4 @@ runs/
 data/
 # Disabled model weights kept locally for rollback
 *.broken.bak
+*.v1.bak

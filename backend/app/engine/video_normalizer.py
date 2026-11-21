@@ -42,24 +42,22 @@ def probe_video(path: Path) -> Dict[str, Any]:
     )
     format_name = fmt_match.group(1) if fmt_match else None
 
-    # Find the first video stream
-    video_match = re.search(
-        r"Stream #\d+:\d+\[\w+\]:\s+Video:\s+([^\s,]+)\s*\([^)]*\),\s*([^\s,]+),\s*(\d+x\d+),\s*([\d.]+)\s*(?:kb/s|kbps),\s*([\d.]+)\s*fps",
-        stderr,
-    )
-    if video_match:
-        codec_name = video_match.group(1)
-        pix_fmt = video_match.group(2)
-        dims = video_match.group(3)
-        fps = float(video_match.group(4))
-        w, h = dims.split("x")
-        width, height = int(w), int(h)
-    else:
-        codec_name = None
-        pix_fmt = None
-        width = None
-        height = None
-        fps = None
+    # Find the first video stream. Parse each field separately: real files add
+    # language tags "(und)", several "(...)" codec notes and "yuv420p(tv, ...)",
+    # which broke a single all-in-one regex (every upload was re-encoded).
+    codec_name = pix_fmt = width = height = fps = None
+    line = next((ln for ln in stderr.splitlines() if re.search(r"Stream #\d+:\d+.*?:\s*Video:", ln)), None)
+    if line:
+        body = line.split("Video:", 1)[1]
+        m = re.match(r"\s*(\w+)", body)
+        codec_name = m.group(1) if m else None
+        m = re.search(r",\s*(yuv\w+|yuvj\w+|nv\d+\w*|rgb\w+|bgr\w+|gray\w*|p010\w*)", body)
+        pix_fmt = m.group(1) if m else None
+        m = re.search(r",\s*(\d{2,5})x(\d{2,5})", body)
+        if m:
+            width, height = int(m.group(1)), int(m.group(2))
+        m = re.search(r"([\d.]+)\s*fps", body)
+        fps = float(m.group(1)) if m else None
 
     # Duration
     dur_match = re.search(r"Duration:\s*(\d+:\d+:\d+\.\d+)", stderr)
@@ -89,6 +87,21 @@ def is_compatible(info: Dict[str, Any]) -> bool:
         return False
     fmt = info.get("format_name", "") or ""
     return "mov" in fmt.lower() or "mp4" in fmt.lower()
+
+
+def remux_faststart(input_path: Path, output_path: Path) -> Dict[str, Any]:
+    """Lossless stream copy into MP4 with the index (moov) at the front.
+
+    For uploads that are already H.264/yuv420p: browsers can start playback
+    immediately and no image quality is lost. Raises RuntimeError on failure.
+    """
+    result = subprocess.run(
+        [FFMPEG_EXE, "-i", str(input_path), "-c", "copy", "-movflags", "+faststart", "-y", str(output_path)],
+        capture_output=True, text=True, timeout=120,
+    )
+    if result.returncode != 0 or not Path(output_path).exists():
+        raise RuntimeError(f"remux failed: {result.stderr[-300:]}")
+    return probe_video(output_path)
 
 
 def normalize_video(input_path: Path, output_path: Path) -> Dict[str, Any]:
@@ -123,7 +136,7 @@ def normalize_video(input_path: Path, output_path: Path) -> Dict[str, Any]:
         "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
         "-preset", "veryfast",
-        "-crf", "23",
+        "-crf", "18",          # near-transparent: a small, fast ball survives re-encoding
         "-c:a", "aac",
         "-movflags", "+faststart",
         "-y",

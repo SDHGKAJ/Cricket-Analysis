@@ -12,10 +12,13 @@ import { StatusBadge } from './components/StatusBadge';
 import { FeedbackPanel } from './components/FeedbackPanel';
 import { RecentAnalyses } from './components/RecentAnalyses';
 import { buildMetricTiles, buildPhaseMarkers, groupFeedback } from './services/reportMapper';
-import { createBattingSession, uploadVideoShot } from './services/api';
+import { createBattingSession, recalibrateTrajectory, uploadVideoShot } from './services/api';
+import { HawkEyePanel, HawkView } from './components/HawkEyePanel';
+import { drawCalibration, drawPitch3D, drawVideoOverlay } from './services/hawkeye';
+import type { Calibration, Trajectory } from './types/trajectory';
 
 type AppState = 'empty' | 'processing' | 'results' | 'error';
-type ViewId = 'pose' | 'hud' | 'original';
+type ViewId = 'pose' | 'hud' | 'original' | 'hawkeye';
 
 interface VideoView {
   id: ViewId;
@@ -82,6 +85,14 @@ export const App: React.FC = () => {
   const [seek, setSeek] = useState<SeekRequest | null>(null);
   const [liveSkeleton, setLiveSkeleton] = useState(false);
 
+  /* Hawk-Eye */
+  const [traj, setTraj] = useState<Trajectory | null>(null);
+  const [trajLoading, setTrajLoading] = useState(false);
+  const [hawkView, setHawkView] = useState<HawkView>('video');
+  const [calibrating, setCalibrating] = useState(false);
+  const [calibPoints, setCalibPoints] = useState<Array<[number, number]>>([]);
+  const [calibError, setCalibError] = useState<string | null>(null);
+
   useEffect(() => {
     if (!shot?.cricket_report_url) { setReport(null); return; }
     let cancelled = false;
@@ -91,6 +102,18 @@ export const App: React.FC = () => {
       .catch(() => { if (!cancelled) setReport(null); });
     return () => { cancelled = true; };
   }, [shot?.cricket_report_url]);
+
+  useEffect(() => {
+    if (!shot?.trajectory_url) { setTraj(null); return; }
+    let cancelled = false;
+    setTrajLoading(true);
+    fetch(shot.trajectory_url)
+      .then((r) => { if (!r.ok) throw new Error(); return r.json(); })
+      .then((d) => { if (!cancelled) setTraj(d); })
+      .catch(() => { if (!cancelled) setTraj(null); })
+      .finally(() => { if (!cancelled) setTrajLoading(false); });
+    return () => { cancelled = true; };
+  }, [shot?.trajectory_url]);
 
   useEffect(() => {
     if (appState !== 'processing') return;
@@ -105,6 +128,9 @@ export const App: React.FC = () => {
     if (shot.cricket_video_url) v.push({ id: 'hud', label: 'Shot HUD', hint: 'Weight, contact and phases', src: shot.cricket_video_url });
     const original = shot.video_url ?? previewUrl;
     if (original) v.push({ id: 'original', label: 'Original', hint: 'Your clip', src: original });
+    if (original && shot.trajectory_url) {
+      v.push({ id: 'hawkeye', label: 'Hawk-Eye', hint: 'Ball path, bounce and stump prediction', src: original });
+    }
     return v;
   }, [shot, previewUrl]);
 
@@ -125,7 +151,42 @@ export const App: React.FC = () => {
   const videoFrames = ballTracking?.frames_total || shot?.total_frames || 0;
 
   const seekTo = useCallback((ms: number) => setSeek({ ms, id: Date.now() }), []);
-  const switchView = (id: ViewId) => { setSeek(null); setView(id); };
+  const switchView = (id: ViewId) => {
+    setSeek(null);
+    setView(id);
+    if (id !== 'hawkeye') setCalibrating(false);
+  };
+
+  /* Hawk-Eye overlay: redrawn every animation frame by the player */
+  const isHawk = activeView?.id === 'hawkeye';
+  const hawkOverlay = useMemo(() => {
+    if (!isHawk) return undefined;
+    return (ctx: CanvasRenderingContext2D, w: number, h: number, t: number) => {
+      if (hawkView === 'pitch' && !calibrating) drawPitch3D(ctx, w, h, t, traj);
+      else if (traj) drawVideoOverlay(ctx, w, h, t, traj);
+      if (calibrating) drawCalibration(ctx, w, h, calibPoints);
+    };
+  }, [isHawk, hawkView, traj, calibrating, calibPoints]);
+
+  const submitCalibration = (cal: Calibration | null) => {
+    if (!traj?.id) return;
+    setCalibError(null);
+    recalibrateTrajectory(traj.id, cal, batterHand)
+      .then((t) => {
+        setTraj(t);
+        const ignored = t.notes.find((n) => n.startsWith('Calibration ignored'));
+        if (cal && ignored) setCalibError(ignored);
+      })
+      .catch((e) => setCalibError(e?.message || 'Calibration failed'));
+  };
+
+  const onCalibClick = (x: number, y: number) => {
+    const pts = [...calibPoints, [x, y] as [number, number]];
+    if (pts.length < 5) { setCalibPoints(pts); return; }
+    setCalibrating(false);
+    setCalibPoints([]);
+    submitCalibration({ batterEnd: [pts[0], pts[1]], bowlerEnd: [pts[2], pts[3]], stumpTop: pts[4] });
+  };
 
   const reset = () => {
     setAppState('empty');
@@ -135,6 +196,10 @@ export const App: React.FC = () => {
     setTimeMs(0);
     setDurationMs(0);
     setSeek(null);
+    setTraj(null);
+    setCalibrating(false);
+    setCalibPoints([]);
+    setCalibError(null);
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     setPreviewUrl(null);
   };
@@ -271,14 +336,19 @@ export const App: React.FC = () => {
               <div className="flex-1 min-w-[200px] space-y-1.5">
                 <div className="flex flex-wrap items-center gap-2">
                   <StatusBadge status={ratingStatus(score)} label={ratingLabel(score)} />
-                  {shot.shot_type && (
+                  {shot.shot_type && (shot.confidence == null || shot.confidence >= 40) ? (
                     <span className="text-lg font-semibold text-ink capitalize">
                       {shot.shot_type.replace(/_/g, ' ')}
-                      {shot.confidence != null && shot.confidence < 50 && (
-                        <span className="text-sm font-normal text-mute normal-case"> · probably — low confidence</span>
+                      {shot.confidence != null && shot.confidence < 60 && (
+                        <span className="text-sm font-normal text-mute normal-case"> · probably</span>
                       )}
                     </span>
-                  )}
+                  ) : shot.shot_type ? (
+                    // Below 40% the classifier is close to guessing (1 in 7 is 14%) — don't show a name.
+                    <span className="text-lg font-semibold text-mute" title={`Classifier guess: ${shot.shot_type.replace(/_/g, ' ')}`}>
+                      Shot type unclear
+                    </span>
+                  ) : null}
                 </div>
                 <p className="text-xs text-mute">
                   {[
@@ -333,11 +403,29 @@ export const App: React.FC = () => {
                       onRateChange={setRate}
                       landmarks={shot.frames}
                       showSkeleton={activeView.id === 'original' && liveSkeleton}
+                      overlay={hawkOverlay}
+                      onFrameClick={isHawk && calibrating ? onCalibClick : undefined}
                     />
                   ) : (
                     <p className="p-10 text-center text-sm text-mute">No video was returned for this clip.</p>
                   )}
                 </section>
+
+                {isHawk && (
+                  <HawkEyePanel
+                    traj={traj}
+                    loading={trajLoading}
+                    view={hawkView}
+                    onView={setHawkView}
+                    calibrating={calibrating}
+                    calibStep={calibPoints.length}
+                    calibError={calibError}
+                    onStartCalibration={() => { setHawkView('video'); setCalibPoints([]); setCalibError(null); setCalibrating(true); }}
+                    onUndoPoint={() => setCalibPoints((p) => p.slice(0, -1))}
+                    onCancelCalibration={() => { setCalibrating(false); setCalibPoints([]); }}
+                    onClearCalibration={() => submitCalibration(null)}
+                  />
+                )}
 
                 <PhaseTimeline markers={markers} durationMs={durationMs} timeMs={timeMs} onSeek={seekTo} />
               </div>

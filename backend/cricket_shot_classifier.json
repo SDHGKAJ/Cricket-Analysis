@@ -1,0 +1,27 @@
+{
+  "feature_version": 2,
+  "seq_len": 45,
+  "n_features": 132,
+  "classes": [
+    "cover_drive",
+    "cut_shot",
+    "flick_shot",
+    "forward_defense",
+    "pull_shot",
+    "straight_drive",
+    "sweep_shot"
+  ],
+  "val_accuracy": 0.6941,
+  "test_accuracy": 0.6325,
+  "per_class_recall": {
+    "cover_drive": 0.522,
+    "cut_shot": 0.565,
+    "flick_shot": 0.542,
+    "forward_defense": 0.708,
+    "pull_shot": 0.773,
+    "straight_drive": 0.56,
+    "sweep_shot": 0.76
+  },
+  "test_clips": 166,
+  "dataset": "rokmr/cricket-shot (broadcast footage)"
+}

@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cricvision/trajectory/v1",
+  "title": "Hawk-Eye trajectory (one delivery)",
+  "description": "Written by backend/app/engine/trajectory.py to backend/outputs/trajectory_<id>.json. Image coordinates are pixels of the analysed video. Pitch coordinates are metres: x lateral (+ = screen-right), y distance from the batter's stumps toward the bowler, z height. Metrics that need real-world distances are null unless the pitch is calibrated.",
+  "type": "object",
+  "required": ["version", "status", "fps", "width", "height", "frames", "bounce", "predicted", "metrics", "notes"],
+  "$defs": {
+    "xy": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+    "trackPoint": {
+      "type": "object",
+      "required": ["f", "x", "y"],
+      "properties": {
+        "f": { "type": "number", "description": "Frame number (fractional for predicted points)" },
+        "x": { "type": "number" },
+        "y": { "type": "number" }
+      }
+    },
+    "nullableNumber": { "type": ["number", "null"] }
+  },
+  "properties": {
+    "version": { "const": 1 },
+    "id": { "type": ["string", "null"], "description": "Upload id; POST /api/trajectory/{id} rebuilds it" },
+    "status": { "enum": ["ok", "insufficient"] },
+    "fps": { "type": "number" },
+    "width": { "type": "integer" },
+    "height": { "type": "integer" },
+    "batterHand": { "enum": ["right", "left"] },
+    "calibrated": { "type": "boolean" },
+    "calibration": {
+      "type": ["object", "null"],
+      "description": "Clicked in video pixels. L/R = crease ends as they appear left/right on screen.",
+      "required": ["batterEnd", "bowlerEnd", "stumpTop"],
+      "properties": {
+        "batterEnd": { "type": "array", "items": { "$ref": "#/$defs/xy" }, "minItems": 2, "maxItems": 2 },
+        "bowlerEnd": { "type": "array", "items": { "$ref": "#/$defs/xy" }, "minItems": 2, "maxItems": 2 },
+        "stumpTop": { "$ref": "#/$defs/xy" }
+      }
+    },
+    "raw": {
+      "type": "array",
+      "description": "Detections from the existing ball model, unmodified",
+      "items": {
+        "allOf": [{ "$ref": "#/$defs/trackPoint" }],
+        "properties": { "conf": { "$ref": "#/$defs/nullableNumber" } }
+      }
+    },
+    "dropped": {
+      "type": "object",
+      "properties": { "lowConf": { "type": "integer" }, "outliers": { "type": "integer" } }
+    },
+    "frames": {
+      "type": "array",
+      "description": "Cleaned, interpolated and smoothed track (image px), one per frame",
+      "items": {
+        "allOf": [{ "$ref": "#/$defs/trackPoint" }],
+        "properties": {
+          "interpolated": { "type": "boolean" },
+          "segment": { "enum": ["pre", "post"] }
+        }
+      }
+    },
+    "bounce": {
+      "type": ["object", "null"],
+      "properties": {
+        "frame": { "type": "integer" },
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "pitchX": { "type": "number", "description": "metres, calibrated only" },
+        "pitchY": { "type": "number", "description": "metres from the batter's stumps, calibrated only" }
+      }
+    },
+    "predicted": {
+      "type": "array",
+      "description": "Extrapolated image path from the last tracked frame to the stump plane (calibrated + bounce only)",
+      "items": { "$ref": "#/$defs/trackPoint" }
+    },
+    "impact": {
+      "type": ["object", "null"],
+      "properties": {
+        "f": { "type": "number" },
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "lateralM": { "$ref": "#/$defs/nullableNumber" },
+        "heightM": { "$ref": "#/$defs/nullableNumber" }
+      }
+    },
+    "stumps": {
+      "type": ["object", "null"],
+      "description": "Image px of the three stumps at the batter's end (calibrated only)",
+      "properties": {
+        "base": { "type": "array", "items": { "$ref": "#/$defs/xy" } },
+        "top": { "type": "array", "items": { "$ref": "#/$defs/xy" } }
+      }
+    },
+    "pitch3d": {
+      "type": ["object", "null"],
+      "description": "3D reconstruction for the virtual pitch view (calibrated + bounce only)",
+      "properties": {
+        "path": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["f", "x", "y", "z", "predicted"],
+            "properties": {
+              "f": { "type": "number" }, "x": { "type": "number" }, "y": { "type": "number" },
+              "z": { "type": "number" }, "predicted": { "type": "boolean" }
+            }
+          }
+        },
+        "bounce": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" } } },
+        "impact": { "type": "object", "properties": { "x": { "type": "number" }, "z": { "type": "number" } } }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "speed": { "$ref": "#/$defs/nullableNumber", "description": "km/h, average release-to-bounce (estimate)" },
+        "length": { "enum": ["yorker", "full", "good", "short", null] },
+        "lengthM": { "$ref": "#/$defs/nullableNumber" },
+        "line": { "type": ["string", "null"], "description": "middle | off stump | leg stump | outside off | outside leg" },
+        "lineCm": { "$ref": "#/$defs/nullableNumber", "description": "+ = off side" },
+        "swing": { "$ref": "#/$defs/nullableNumber", "description": "cm, max pre-bounce deviation" },
+        "swingPx": { "$ref": "#/$defs/nullableNumber", "description": "same, in image px (always available)" },
+        "turnDeg": { "$ref": "#/$defs/nullableNumber", "description": "image-space direction change at the bounce" },
+        "turnCm": { "$ref": "#/$defs/nullableNumber", "description": "lateral deviation at the stumps vs. the pre-bounce line" },
+        "heightAtStumps": { "$ref": "#/$defs/nullableNumber", "description": "metres" },
+        "lateralAtStumpsCm": { "$ref": "#/$defs/nullableNumber", "description": "+ = off side of middle stump" },
+        "decision": { "enum": ["HITTING", "MISSING", "UMPIRE'S CALL", null] },
+        "reviewRetained": { "type": "boolean", "description": "true for UMPIRE'S CALL (DRS rule)" }
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Assumptions and reasons any metric is missing"
+    }
+  }
+}

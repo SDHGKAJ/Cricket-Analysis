@@ -1,4 +1,5 @@
 import { ShotAnalysis, FrameLandmarks, CameraAngle, BatterHand, SessionRecord } from '../types/cricket';
+import type { Calibration, Trajectory } from '../types/trajectory';
 
 const API_BASE = '/api';
 
@@ -45,6 +46,23 @@ export async function uploadVideoShot(
 
   if (!response.ok) {
     throw new Error(`Video upload failed: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+/** Rebuild a saved Hawk-Eye trajectory with a pitch calibration (null clears it). */
+export async function recalibrateTrajectory(
+  id: string,
+  calibration: Calibration | null,
+  batterHand?: BatterHand,
+): Promise<Trajectory> {
+  const response = await fetch(`${API_BASE}/trajectory/${encodeURIComponent(id)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ calibration, batterHand }),
+  });
+  if (!response.ok) {
+    throw new Error(`Calibration failed: ${response.statusText}`);
   }
   return response.json();
 }

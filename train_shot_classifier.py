@@ -1,327 +1,292 @@
 """
-Cricket Shot Classifier Training Pipeline
-=========================================
-Trains an ONNX shot classifier from the rokmr/cricket-shot video dataset.
+Cricket shot-type classifier — training pipeline (v2)
+=====================================================
+Trains the ONNX model used by backend/app/engine/shot_classifier.py on the
+rokmr/cricket-shot video dataset.
 
-Input:  D:/CricketEnv/datasets/cricket-shot/cricketshot/{train,val,test}/{class}/*.avi
-Output: backend/cricket_shot_classifier.onnx  (drop-in for MLShotClassifier)
+Why v2: the v1 model answered "pull_shot" for every input (12.9% test
+accuracy, 7 classes). Its pose cache was mostly placeholder frames, was keyed
+by file name only (250 names exist in more than one split), and inference fed
+the first 45 frames while training sampled whole clips.
 
-Model input shape: (1, 45, 99)  ->  45 frames x 33 landmarks x (x, y, z)
-Shot classes (7): cover_drive, forward_defense, flick_shot, pull_shot,
-                  cut_shot, straight_drive, sweep_shot
+  Phase 1  extract   MediaPipe pose for every frame of every clip, cached per
+                     split/class/clip in backend/shot_features_v2/*.npz
+  Phase 2  train     features from app.engine.shot_features (the SAME code the
+                     API uses), 1D-CNN + BiGRU, class-weighted loss,
+                     augmentation; best epoch by val accuracy; test report
 
-Features are cached to backend/shot_features/{split}/{class}/{video}.npy
-so pose extraction only happens once.
+Outputs
+  backend/cricket_shot_classifier.onnx       input "x" (1, 45, 132) -> "logits" (1, 7)
+  backend/cricket_shot_classifier.json       classes, feature version, test metrics
 
-Usage:
-  # Quick validation run (small subset):
-  D:/CricketEnv/Scripts/python.exe train_shot_classifier.py --subset 20
-
-  # Full training (all videos, cached after first run):
-  D:/CricketEnv/Scripts/python.exe train_shot_classifier.py
-
-  # Re-train with cached features (fast):
-  D:/CricketEnv/Scripts/python.exe train_shot_classifier.py --use-cache
+Usage (repo root)
+  python train_shot_classifier.py                       # extract (cached) + train
+  python train_shot_classifier.py --workers 3 --epochs 120
+  CRICKET_DATASET_DIR=D:/path/to/cricketshot python train_shot_classifier.py
 """
+from __future__ import annotations
 
+import argparse
+import json
 import os
 import sys
-import cv2
-import math
-import json
-import argparse
-import numpy as np
-from pathlib import Path
 from collections import Counter
+from multiprocessing import Pool
+from pathlib import Path
 
-# ---------------------------------------------------------------- config ---
+import numpy as np
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "backend"))
+from app.engine.shot_features import (  # noqa: E402
+    FEATURE_VERSION, N_FEATURES, SEQ_LEN, select_window, sequence_features,
+)
+
 DATASET_ROOT = Path(os.getenv("CRICKET_DATASET_DIR", r"D:\CricketEnv\datasets\cricket-shot\cricketshot"))
-OUTPUT_ONNX  = Path("backend/cricket_shot_classifier.onnx")
-FEATURE_DIR  = Path("backend/shot_features")
-SEQ_LEN      = 45        # frames per sequence (matches MLShotClassifier)
-LANDMARKS    = 33        # MediaPipe Pose landmarks
-FEATURES     = LANDMARKS * 3  # x, y, z per landmark = 99
+CACHE_DIR = ROOT / "backend" / "shot_features_v2"
+OUT_ONNX = ROOT / "backend" / "cricket_shot_classifier.onnx"
+OUT_META = ROOT / "backend" / "cricket_shot_classifier.json"
 
+# dataset folder -> output class (hook / late_cut / lofted are not modelled)
 CLASS_MAP = {
-    "cover":      "cover_drive",
-    "defense":    "forward_defense",
-    "flick":      "flick_shot",
-    "pull":       "pull_shot",
-    "square_cut": "cut_shot",
-    "straight":   "straight_drive",
-    "sweep":      "sweep_shot",
+    "cover": "cover_drive", "defense": "forward_defense", "flick": "flick_shot",
+    "pull": "pull_shot", "square_cut": "cut_shot", "straight": "straight_drive", "sweep": "sweep_shot",
 }
-SKIP_CLASSES = {"hook", "late_cut", "lofted"}
-OUTPUT_CLASSES = sorted(set(CLASS_MAP.values()))
-CLASS_TO_IDX   = {c: i for i, c in enumerate(OUTPUT_CLASSES)}
-IDX_TO_CLASS   = {i: c for c, i in CLASS_TO_IDX.items()}
-
-print("Output classes:", OUTPUT_CLASSES)
-
-# ---------------------------------------------------------------- pose ---
-# MediaPipe Tasks API (PoseLandmarker) — mp.solutions.pose was removed in >=0.9.x
-POSE_MODEL_PATH = os.getenv("POSE_MODEL_PATH", r"D:\CricketEnv\models\pose_landmarker_heavy.task")
-try:
-    from mediapipe.tasks import python as mp_tasks
-    from mediapipe.tasks.python import vision
-    from mediapipe import Image as mpImage, ImageFormat
-    _base_options = mp_tasks.BaseOptions(model_asset_path=POSE_MODEL_PATH)
-    _options = vision.PoseLandmarkerOptions(
-        base_options=_base_options,
-        running_mode=vision.RunningMode.VIDEO,
-        num_poses=1,
-    )
-    _landmarker = vision.PoseLandmarker.create_from_options(_options)
-    print("MediaPipe Tasks PoseLandmarker loaded")
-except Exception as e:
-    print("MediaPipe Tasks not available:", e)
-    _landmarker = None
+CLASSES = sorted(set(CLASS_MAP.values()))
+CLASS_IDX = {c: i for i, c in enumerate(CLASSES)}
 
 
-def extract_landmarks(frame_bgr):
-    """Return 99 floats (33 landmarks x xyz) or zeros if no pose detected."""
-    if _landmarker is None:
-        return [0.5, 0.5, 0.0] * LANDMARKS
-    rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    mp_image = mpImage(image_format=ImageFormat.SRGB, data=rgb)
-    # Use a monotonically increasing timestamp for VIDEO mode
-    extract_landmarks._ts += 1
-    res = _landmarker.detect_for_video(mp_image, extract_landmarks._ts)
-    if not res.pose_landmarks or len(res.pose_landmarks[0]) < LANDMARKS:
-        return [0.5, 0.5, 0.0] * LANDMARKS
-    flat = []
-    for lm in res.pose_landmarks[0][:LANDMARKS]:
-        flat.extend([lm.x, lm.y, lm.z])
-    return flat  # length 99
+# ═══════════════════════════════════════════════════════════════ Phase 1 ═══
+def list_clips(split: str):
+    out = []
+    for folder, cls in CLASS_MAP.items():
+        d = DATASET_ROOT / split / folder
+        if d.is_dir():
+            for f in sorted(d.iterdir()):
+                if f.suffix.lower() in (".avi", ".mp4", ".mov") and not f.name.startswith("._"):
+                    out.append((split, folder, f))
+    return out
 
 
-extract_landmarks._ts = 0
+def cache_path(split: str, folder: str, video: Path) -> Path:
+    return CACHE_DIR / split / folder / f"{video.stem}.npz"
 
 
-def video_to_sequence(video_path, seq_len=SEQ_LEN, use_cache=True):
-    """
-    Extract pose landmarks from a video and return (seq_len, 99) float32.
-    Caches to .npy under FEATURE_DIR.
-    """
-    cache_path = FEATURE_DIR / f"{Path(video_path).stem}.npy"
-    if use_cache and cache_path.exists():
-        return np.load(cache_path)
+def extract_clip(job) -> str:
+    """Pose for every frame of one clip -> npz(t_ms, pts[T,33,3], has[T])."""
+    split, folder, video = job
+    out = cache_path(split, folder, video)
+    if out.exists():
+        return "cached"
+    import cv2
+    from app.engine.pose_overlay import create_pose_detector
 
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        return None
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    # fresh tracker per clip; 0.3 confidence finds the (small) broadcast batter in
+    # ~69% of frames vs ~53% at the API's 0.5 default (sampled on 14 clips)
+    det = create_pose_detector(min_conf=0.3)
+    if det is None:
+        return "no-detector"
+    cap = cv2.VideoCapture(str(video))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    t, pts, has = [], [], []
+    i = 0
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        ts = i * 1000.0 / fps
+        lms = det.detect(frame, ts)
+        p = np.zeros((33, 3), np.float32)
+        if lms is not None and len(lms) >= 33:
+            p[:] = [(l.x, l.y, getattr(l, "visibility", 1.0) or 0.0) for l in list(lms)[:33]]
+        t.append(ts); pts.append(p); has.append(lms is not None)
+        i += 1
     cap.release()
-    if total <= 0:
-        return None
-
-    indices = np.linspace(0, total - 1, seq_len).astype(int)
-
-    cap = cv2.VideoCapture(str(video_path))
-    seq = []
-    for idx in indices:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            flat = [0.5, 0.5, 0.0] * LANDMARKS
-        else:
-            flat = extract_landmarks(frame)
-        while len(flat) < FEATURES:
-            flat.append(0.0)
-        seq.append(flat[:FEATURES])
-    cap.release()
-
-    arr = np.array(seq, dtype=np.float32)  # (seq_len, 99)
-    if use_cache:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        np.save(cache_path, arr)
-    return arr
+    det.close()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(out, t=np.array(t), pts=np.array(pts, np.float32), has=np.array(has, bool))
+    return "ok" if i else "empty"
 
 
-# ------------------------------------------------------------ data loading ---
-def collect_items(split, max_per_class=None):
-    """Return list of (video_path, target_idx, class_name)."""
-    split_dir = DATASET_ROOT / split
-    items = []
-    if not split_dir.exists():
-        return items
-    for cls_name in sorted(os.listdir(split_dir)):
-        if cls_name in SKIP_CLASSES:
+def extract_all(workers: int) -> None:
+    jobs = [j for s in ("train", "val", "test") for j in list_clips(s)]
+    todo = [j for j in jobs if not cache_path(*j).exists()]
+    print(f"Clips: {len(jobs)} | already cached: {len(jobs) - len(todo)} | to extract: {len(todo)}", flush=True)
+    if not todo:
+        return
+    done = Counter()
+    with Pool(workers) as pool:
+        for k, r in enumerate(pool.imap_unordered(extract_clip, todo, chunksize=4), 1):
+            done[r] += 1
+            if k % 50 == 0 or k == len(todo):
+                print(f"  extracted {k}/{len(todo)} {dict(done)}", flush=True)
+
+
+# ═══════════════════════════════════════════════════════════════ Phase 2 ═══
+def load_split(split: str):
+    """Raw arrays per clip (features are built later so training can augment)."""
+    items, skipped = [], 0
+    for _, folder, video in list_clips(split):
+        p = cache_path(split, folder, video)
+        if not p.exists():
+            skipped += 1
             continue
-        if cls_name not in CLASS_MAP:
-            continue
-        cls_dir = split_dir / cls_name
-        if not cls_dir.is_dir():
-            continue
-        target = CLASS_MAP[cls_name]
-        target_idx = CLASS_TO_IDX[target]
-        vids = sorted([f for f in os.listdir(cls_dir)
-                       if not f.startswith("._")
-                       and f.lower().endswith((".avi", ".mp4", ".mov", ".webm"))])
-        if max_per_class:
-            vids = vids[:max_per_class]
-        for vid_name in vids:
-            items.append((str(cls_dir / vid_name), target_idx, target))
-    return items
+        z = np.load(p)
+        items.append((z["t"], z["pts"], z["has"], CLASS_IDX[CLASS_MAP[folder]]))
+    return items, skipped
 
 
-def build_dataset(split, max_per_class=None, use_cache=True):
-    items = collect_items(split, max_per_class)
-    X, y, names, paths = [], [], [], []
-    for i, (vid_path, target_idx, class_name) in enumerate(items):
-        seq = video_to_sequence(vid_path, use_cache=use_cache)
-        if seq is None:
-            print(f"  [skip] {vid_path}")
-            continue
-        X.append(seq)
-        y.append(target_idx)
-        names.append(class_name)
-        paths.append(vid_path)
-        if (i + 1) % 50 == 0:
-            print(f"  processed {i+1}/{len(items)} videos in {split}")
-    return np.array(X), np.array(y), names, paths
+def augment(t, pts, has, rng):
+    """Random time crop (85-100%), scale/rotation jitter and landmark noise."""
+    n = len(t)
+    keep = max(8, int(n * rng.uniform(0.85, 1.0)))
+    s = rng.integers(0, n - keep + 1)
+    t, pts, has = t[s:s + keep], pts[s:s + keep].copy(), has[s:s + keep]
+    ang = np.deg2rad(rng.uniform(-8, 8))
+    rot = np.array([[np.cos(ang), -np.sin(ang)], [np.sin(ang), np.cos(ang)]], np.float32)
+    c = np.array([0.5, 0.5], np.float32)
+    pts[:, :, :2] = (pts[:, :, :2] - c) @ rot.T * rng.uniform(0.9, 1.1) + c
+    pts[:, :, :2] += rng.normal(0, 0.003, pts[:, :, :2].shape).astype(np.float32)
+    return t, pts, has
 
 
-# ---------------------------------------------------------------- model ---
-import torch
-import torch.nn as nn
-from torch.utils.data import TensorDataset, DataLoader
-
-print(f"\nPyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}")
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-class ShotClassifierNet(nn.Module):
-    def __init__(self, input_size=FEATURES, hidden_size=128, num_layers=2,
-                 num_classes=len(OUTPUT_CLASSES), dropout=0.3):
-        super().__init__()
-        self.lstm = nn.LSTM(
-            input_size=input_size, hidden_size=hidden_size,
-            num_layers=num_layers, batch_first=True,
-            dropout=dropout if num_layers > 1 else 0.0,
-            bidirectional=True,
-        )
-        self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_size * 2, num_classes)
-
-    def forward(self, x):
-        out, _ = self.lstm(x)
-        out = out[:, -1, :]
-        out = self.dropout(out)
-        return self.fc(out)
+def featurise(items, rng=None):
+    X, y = [], []
+    for t, pts, has, label in items:
+        if rng is not None:
+            t, pts, has = augment(t, pts, has, rng)
+        f = sequence_features(t, pts, has, window=select_window(t, pts, has))
+        if f is not None:
+            X.append(f); y.append(label)
+    return np.array(X, np.float32), np.array(y, np.int64)
 
 
-# ---------------------------------------------------------------- main ---
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--subset", type=int, default=None,
-                        help="max videos per class for quick validation")
-    parser.add_argument("--use-cache", action="store_true", default=True,
-                        help="use cached .npy features")
-    parser.add_argument("--no-cache", action="store_true",
-                        help="force re-extraction (ignore cache)")
-    parser.add_argument("--epochs", type=int, default=30)
-    args = parser.parse_args()
+def build_model():
+    import torch.nn as nn
 
-    use_cache = args.use_cache and not args.no_cache
-    FEATURE_DIR.mkdir(parents=True, exist_ok=True)
+    class ShotNet(nn.Module):
+        """Temporal convs for local motion, BiGRU for order, mean+max pooling."""
 
-    print(f"\nLoading data (subset={args.subset}, cache={use_cache})...")
-    X_train, y_train, _, train_paths = build_dataset("train", args.subset, use_cache)
-    X_val, y_val, _, val_paths = build_dataset("val", args.subset, use_cache)
-    X_test, y_test, _, test_paths = build_dataset("test", args.subset, use_cache)
+        def __init__(self, n_in=N_FEATURES, n_cls=len(CLASSES)):
+            super().__init__()
+            self.conv = nn.Sequential(
+                nn.Conv1d(n_in, 128, 5, padding=2), nn.BatchNorm1d(128), nn.ReLU(), nn.Dropout(0.2),
+                nn.Conv1d(128, 128, 5, padding=2), nn.BatchNorm1d(128), nn.ReLU(), nn.Dropout(0.2),
+            )
+            self.gru = nn.GRU(128, 96, batch_first=True, bidirectional=True)
+            self.head = nn.Sequential(nn.Dropout(0.3), nn.Linear(96 * 4, n_cls))
 
-    print(f"\nTrain: {X_train.shape}, Val: {X_val.shape}, Test: {X_test.shape}")
-    print("Train class dist:", Counter(IDX_TO_CLASS[int(c)] for c in y_train))
+        def forward(self, x):                      # x: (B, T, F)
+            import torch
+            h = self.conv(x.transpose(1, 2)).transpose(1, 2)
+            h, _ = self.gru(h)
+            return self.head(torch.cat([h.mean(1), h.amax(1)], dim=1))
 
-    X_train_t = torch.from_numpy(X_train).to(DEVICE)
-    y_train_t = torch.from_numpy(y_train).long().to(DEVICE)
-    X_val_t = torch.from_numpy(X_val).to(DEVICE)
-    y_val_t = torch.from_numpy(y_val).long().to(DEVICE)
-    X_test_t = torch.from_numpy(X_test).to(DEVICE)
-    y_test_t = torch.from_numpy(y_test).long().to(DEVICE)
+    return ShotNet()
 
-    train_dl = DataLoader(TensorDataset(X_train_t, y_train_t),
-                          batch_size=32, shuffle=True)
 
-    model = ShotClassifierNet().to(DEVICE)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+def train(epochs: int, seed: int = 0) -> None:
+    import torch
+    import torch.nn as nn
+    from sklearn.metrics import classification_report, confusion_matrix
 
-    best_val_acc = 0.0
-    print(f"\nTraining for {args.epochs} epochs...")
-    for epoch in range(1, args.epochs + 1):
+    rng = np.random.default_rng(seed)
+    torch.manual_seed(seed)
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"\nPyTorch {torch.__version__} on {dev}")
+
+    tr_items, tr_skip = load_split("train")
+    va_items, _ = load_split("val")
+    te_items, _ = load_split("test")
+    X_va, y_va = featurise(va_items)
+    X_te, y_te = featurise(te_items)
+    print(f"Clips with usable pose: train {len(tr_items)} (uncached {tr_skip}) | "
+          f"val {len(X_va)}/{len(va_items)} | test {len(X_te)}/{len(te_items)}")
+
+    counts = Counter(lbl for *_, lbl in tr_items)
+    print("Train classes:", {CLASSES[k]: v for k, v in sorted(counts.items())})
+    w = torch.tensor([len(tr_items) / (len(CLASSES) * max(counts[i], 1)) for i in range(len(CLASSES))],
+                     dtype=torch.float32, device=dev)
+
+    model = build_model().to(dev)
+    opt = torch.optim.AdamW(model.parameters(), lr=2e-3, weight_decay=1e-3)
+    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=2e-3, total_steps=epochs)
+    loss_fn = nn.CrossEntropyLoss(weight=w, label_smoothing=0.05)
+    Xv, yv = torch.from_numpy(X_va).to(dev), torch.from_numpy(y_va).to(dev)
+
+    best, best_state, patience = -1.0, None, 0
+    for ep in range(1, epochs + 1):
+        X_tr, y_tr = featurise(tr_items, rng)          # fresh augmentation each epoch
+        perm = rng.permutation(len(X_tr))
         model.train()
-        train_loss, train_correct, train_total = 0.0, 0, 0
-        for xb, yb in train_dl:
-            optimizer.zero_grad()
-            logits = model(xb)
-            loss = criterion(logits, yb)
+        tot = 0.0
+        for i in range(0, len(perm), 32):
+            b = perm[i:i + 32]
+            xb, yb = torch.from_numpy(X_tr[b]).to(dev), torch.from_numpy(y_tr[b]).to(dev)
+            opt.zero_grad()
+            loss = loss_fn(model(xb), yb)
             loss.backward()
-            optimizer.step()
-            train_loss += loss.item() * xb.size(0)
-            train_correct += (logits.argmax(1) == yb).sum().item()
-            train_total += yb.size(0)
-
+            opt.step()
+            tot += loss.item() * len(b)
+        sched.step()
         model.eval()
         with torch.no_grad():
-            val_logits = model(X_val_t)
-            val_loss = criterion(val_logits, y_val_t).item()
-            val_acc = (val_logits.argmax(1) == y_val_t).sum().item() / y_val_t.size(0)
+            va = (model(Xv).argmax(1) == yv).float().mean().item()
+        if va > best:
+            best, patience = va, 0
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        else:
+            patience += 1
+        if ep % 5 == 0 or ep == 1:
+            print(f"epoch {ep:3d}  loss {tot / len(perm):.3f}  val_acc {va:.3f}  best {best:.3f}", flush=True)
+        if patience >= 30:
+            print(f"early stop at epoch {ep}")
+            break
 
-        train_acc = train_correct / train_total
-        print(f"Epoch {epoch:02d}: train_loss={train_loss/train_total:.4f} "
-              f"train_acc={train_acc:.4f} val_loss={val_loss:.4f} val_acc={val_acc:.4f}")
-
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            torch.save(model.state_dict(), "best_shot_classifier.pt")
-
-    print(f"\nBest val accuracy: {best_val_acc:.4f}")
-
-    model.load_state_dict(torch.load("best_shot_classifier.pt"))
+    model.load_state_dict(best_state)
     model.eval()
     with torch.no_grad():
-        test_logits = model(X_test_t)
-        test_acc = (test_logits.argmax(1) == y_test_t).sum().item() / y_test_t.size(0)
-        print(f"Test accuracy: {test_acc:.4f}")
+        pred = model(torch.from_numpy(X_te).to(dev)).argmax(1).cpu().numpy()
+    test_acc = float((pred == y_te).mean())
+    print(f"\nBest val accuracy {best:.3f} | TEST accuracy {test_acc:.3f}  (chance = {1 / len(CLASSES):.3f})")
+    report = classification_report(y_te, pred, labels=list(range(len(CLASSES))), target_names=CLASSES,
+                                   zero_division=0, output_dict=True)
+    print(classification_report(y_te, pred, labels=list(range(len(CLASSES))), target_names=CLASSES, zero_division=0))
+    print("Confusion matrix (rows = truth):\n", confusion_matrix(y_te, pred, labels=list(range(len(CLASSES)))))
 
-    from sklearn.metrics import classification_report
-    print("\nClassification report:")
-    print(classification_report(
-        y_test_t.cpu().numpy(),
-        test_logits.argmax(1).cpu().numpy(),
-        target_names=OUTPUT_CLASSES,
-        zero_division=0,
-    ))
-
-    # Export ONNX
-    model.eval()
-    dummy = torch.randn(1, SEQ_LEN, FEATURES).to(DEVICE)
-    try:
-        torch.onnx.export(
-            model, dummy, str(OUTPUT_ONNX),
-            export_params=True, opset_version=13, do_constant_folding=True,
-            input_names=["input"], output_names=["logits"],
-            dynamic_axes={"input": {0: "batch"}, "logits": {0: "batch"}},
-            dynamo=False,  # use legacy TorchScript exporter (no onnxscript needed)
-        )
-    except TypeError:
-        # Older torch without dynamo param
-        torch.onnx.export(
-            model, dummy, str(OUTPUT_ONNX),
-            export_params=True, opset_version=13, do_constant_folding=True,
-            input_names=["input"], output_names=["logits"],
-            dynamic_axes={"input": {0: "batch"}, "logits": {0: "batch"}},
-        )
-    print(f"\nONNX exported: {OUTPUT_ONNX.resolve()}")
-
+    # ── export ────────────────────────────────────────────────────────────
+    model = model.cpu()
+    dummy = torch.zeros(1, SEQ_LEN, N_FEATURES)
+    if OUT_ONNX.exists():
+        OUT_ONNX.replace(OUT_ONNX.with_suffix(".onnx.v1.bak"))
+    torch.onnx.export(model, dummy, str(OUT_ONNX), input_names=["x"], output_names=["logits"],
+                      dynamic_axes={"x": {0: "batch"}, "logits": {0: "batch"}},
+                      opset_version=17, dynamo=False)
+    OUT_META.write_text(json.dumps({
+        "feature_version": FEATURE_VERSION, "seq_len": SEQ_LEN, "n_features": N_FEATURES,
+        "classes": CLASSES, "val_accuracy": round(best, 4), "test_accuracy": round(test_acc, 4),
+        "per_class_recall": {c: round(report[c]["recall"], 3) for c in CLASSES},
+        "test_clips": int(len(y_te)), "dataset": "rokmr/cricket-shot (broadcast footage)",
+    }, indent=2))
     import onnxruntime as ort
-    session = ort.InferenceSession(str(OUTPUT_ONNX))
-    out = session.run(None, {"input": dummy.cpu().numpy()})
-    print("ONNX verification OK, output shape:", out[0].shape)
-    print("\nDONE — backend/cricket_shot_classifier.onnx is ready for MLShotClassifier")
+    s = ort.InferenceSession(str(OUT_ONNX), providers=["CPUExecutionProvider"])
+    ref = model(torch.from_numpy(X_te[:4])).detach().numpy()
+    got = s.run(None, {"x": X_te[:4]})[0]
+    print(f"\nONNX saved to {OUT_ONNX} (max diff vs torch {np.abs(ref - got).max():.2e}); metadata {OUT_META}")
 
 
-if __name__ == "__main__":
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--workers", type=int, default=3, help="pose-extraction processes (RAM ~0.6 GB each)")
+    ap.add_argument("--epochs", type=int, default=120)
+    ap.add_argument("--extract-only", action="store_true")
+    args = ap.parse_args()
+    if not DATASET_ROOT.exists():
+        sys.exit(f"Dataset not found: {DATASET_ROOT} (set CRICKET_DATASET_DIR)")
+    extract_all(args.workers)
+    if not args.extract_only:
+        train(args.epochs)
+
+
+if __name__ == "__main__":   # required on Windows for multiprocessing
     main()

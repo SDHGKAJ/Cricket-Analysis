@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from .contact import detect_contact
 from .pose_overlay import (
     CONF_THRESHOLD,
     MAX_MISSED_FRAMES,
@@ -832,6 +833,24 @@ def _reject_floor_stationary(det, cfg) -> Tuple[bool, str]:
                   f"(spread {max_spread:.0f}px, {len(floor_dets)}/{len(idx)} detections on floor)")
 
 
+def _ball_search_fn():
+    """Raw ball-model boxes for one frame -> [(cx, cy, conf)], for contact's local search."""
+    tracker = _get_tracker()
+    model = getattr(tracker, "yolo_model", None)
+    if model is None:
+        return None
+
+    def search(frame):
+        h, w = frame.shape[:2]
+        res = model(frame, conf=0.1, verbose=False)[0]
+        out = []
+        for (x1, y1, x2, y2), c in zip(res.boxes.xyxy.tolist(), res.boxes.conf.tolist()):
+            if (x2 - x1) * (y2 - y1) <= 0.015 * w * h:      # ball-sized boxes only
+                out.append(((x1 + x2) / 2, (y1 + y2) / 2, float(c)))
+        return out
+    return search
+
+
 def _ball_contact_metric(det, cfg) -> Tuple[Optional[int], Dict[str, Any]]:
     # primary: smallest ball <-> bat-tip distance (ball must be moving — a
     # static false positive locked onto the scene is rejected)
@@ -1414,7 +1433,9 @@ def analyze_cricket_shot(
     feet = _choose_front_foot(det, batter_hand, cfg)
 
     # 2) contact first (other metrics depend on it)
-    contact, ball_contact = _ball_contact_metric(det, cfg)
+    # audio crack + ball-within-reach fusion; vision-only method as fallback
+    contact, ball_contact = detect_contact(input_path, det, lambda: _ball_contact_metric(det, cfg),
+                                           ball_search=_ball_search_fn())
 
     # 3) shot direction (trajectory -> user param -> not detected)
     shot_dir, shot_src = _shot_direction(det, contact, shot_direction)

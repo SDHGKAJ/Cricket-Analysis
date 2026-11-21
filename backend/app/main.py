@@ -6,6 +6,7 @@ coach drills, video processing, and session history management.
 """
 
 import os
+import json
 import re
 import uuid
 import datetime
@@ -38,7 +39,8 @@ from .engine.yolo_tracker import CricketObjectTracker
 from .engine.slowmo_generator import SlowMoReplayGenerator
 from .engine.pose_overlay import analyze_video as analyze_pose_overlay, create_pose_detector
 from .engine.cricket_analyzer import analyze_cricket_shot
-from .engine.video_normalizer import probe_video, normalize_video, is_compatible
+from .engine.video_normalizer import probe_video, normalize_video, is_compatible, remux_faststart
+from .engine.trajectory import build_trajectory, rebuild_from_file
 from .engine.yolo_tracker import CricketBallTracker
 
 # Initialize database tables
@@ -195,7 +197,10 @@ def analyze_shot_sequence(data: AnalyzeShotSequenceRequest, db: Session = Depend
     predicted_shot, conf = classifier.classify(frame_dicts, segmentation, batter_hand=data.batter_hand)
 
     # In MVP, prioritize Cover Drive analysis
-    active_shot = data.shot_type_hint or predicted_shot or "cover_drive"
+    # Shown to the user: the hint, else the classifier's answer ("" = unsure).
+    shown_shot = data.shot_type_hint or predicted_shot or ""
+    # Flaw rules need some shot profile; cover drive is the generic default.
+    active_shot = shown_shot or "cover_drive"
 
     # 3. Compute Biomechanical Metrics
     calculator = MetricsCalculator(camera_angle=data.camera_angle, batter_hand=data.batter_hand)
@@ -231,7 +236,7 @@ def analyze_shot_sequence(data: AnalyzeShotSequenceRequest, db: Session = Depend
             db.commit()
 
     return ShotAnalysisResponse(
-        shot_type=active_shot,
+        shot_type=shown_shot,
         overall_score=overall_score,
         timing_score=timing_score,
         metrics=metrics,
@@ -250,6 +255,7 @@ async def analyze_video_upload(
     camera_angle: str = Form("front_on"),
     batter_hand: str = Form("right"),
     session_id: Optional[str] = Form(None),
+    calibration: Optional[str] = Form(None),  # JSON: batterEnd, bowlerEnd, stumpTop (video px)
     db: Session = Depends(get_db)
 ):
     """
@@ -276,9 +282,15 @@ async def analyze_video_upload(
     except RuntimeError:
         probe_info = {}
 
-    if probe_info and is_compatible(probe_info):
-        # Already H.264 + yuv420p + MP4 — use as-is.
-        normalized_path = saved_path
+    if probe_info and is_compatible(probe_info) and max(probe_info.get("width") or 0,
+                                                        probe_info.get("height") or 0) <= 1280:
+        # Already H.264 + yuv420p + MP4: copy the streams (no quality loss) and move
+        # the index to the front for browser playback. Fall back to the original.
+        try:
+            remux_faststart(saved_path, UPLOAD_DIR / f"fixed_{file_id}.mp4")
+            normalized_path = UPLOAD_DIR / f"fixed_{file_id}.mp4"
+        except RuntimeError:
+            normalized_path = saved_path
     else:
         # Needs normalization — convert to H.264 yuv420p MP4.
         norm_filename = f"fixed_{file_id}.mp4"
@@ -414,6 +426,7 @@ async def analyze_video_upload(
         pass  # pose overlay is best-effort; analysis result is still returned
 
     # Cricket-specific shot analysis: HUD-annotated video + JSON report + feedback
+    contact_info: Optional[Dict[str, Any]] = None
     try:
         cricket_out = OUTPUT_DIR / f"cricket_{file_id}.mp4"
         report = analyze_cricket_shot(
@@ -424,13 +437,74 @@ async def analyze_video_upload(
         result.cricket_report_url = f"/outputs/{cricket_out.stem}.json"
         result.feedback = (result.feedback or []) + report.get("feedback", [])
         result.ball_tracking = report.get("ball_tracking")
+        contact_info = report.get("ball_contact")
     except Exception:
         pass  # cricket analysis is best-effort; rest of the result is still returned
+
+    # Hawk-Eye-style trajectory from the existing ball detections
+    try:
+        cal = _parse_calibration(calibration)
+        detections = [
+            {"f": i, "x": bp[0], "y": bp[1], "conf": bp[2]}
+            for i, bp in enumerate(ball_positions) if bp is not None
+        ]
+        traj = build_trajectory(detections, fps, width, height, calibration=cal,
+                                batter_hand=batter_hand, video_id=file_id, contact=contact_info)
+        _save_trajectory(file_id, traj)
+        result.trajectory_url = f"/outputs/trajectory_{file_id}.json"
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"[analyze-video] trajectory failed: {exc}")
 
     # Add normalized video URL for frontend playback
     result.video_url = f"/uploads/{processing_path.name}"
 
     return result
+
+
+# ── Hawk-Eye trajectory ─────────────────────────────────────────────────
+_TRAJ_ID = re.compile(r"^[0-9a-f]{8}$")
+
+
+def _parse_calibration(raw: Optional[Any]) -> Optional[Dict[str, Any]]:
+    """Accept a dict or a JSON string; None/empty means uncalibrated."""
+    if raw in (None, "", "null"):
+        return None
+    if isinstance(raw, dict):
+        return raw
+    try:
+        val = json.loads(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail={"error": "bad_calibration", "reason": "calibration must be JSON"})
+    return val or None
+
+
+def _save_trajectory(traj_id: str, traj: Dict[str, Any]) -> Path:
+    path = OUTPUT_DIR / f"trajectory_{traj_id}.json"
+    path.write_text(json.dumps(traj))
+    return path
+
+
+@app.post("/api/trajectory/{traj_id}")
+async def recalibrate_trajectory(traj_id: str, body: Dict[str, Any]):
+    """Rebuild a saved trajectory with a pitch calibration.
+
+    Body: {"calibration": {"batterEnd": [[x,y],[x,y]], "bowlerEnd": [[x,y],[x,y]],
+           "stumpTop": [x,y]} | null, "batterHand": "right" | "left" (optional)}
+    Points are in the analysed video's pixel coordinates. Returns the new JSON.
+    """
+    if not _TRAJ_ID.match(traj_id):
+        raise HTTPException(status_code=400, detail="invalid trajectory id")
+    path = OUTPUT_DIR / f"trajectory_{traj_id}.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="trajectory not found")
+    hand = body.get("batterHand")
+    if hand not in (None, "right", "left"):
+        raise HTTPException(status_code=422, detail="batterHand must be 'right' or 'left'")
+    traj = rebuild_from_file(path, _parse_calibration(body.get("calibration")), hand)
+    _save_trajectory(traj_id, traj)
+    return traj
 
 
 @app.post("/api/detect-ball")
