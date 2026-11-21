@@ -72,7 +72,7 @@ CONFIG: Dict[str, Any] = {
     "ball_teleport_ratio": 0.20,    # consecutive jump > ratio*min(w,h) counts as a teleport (tighter)
     "ball_max_teleports": 3,        # more teleports than this = cluster-hopping false positive (tighter)
     # -- ball tracking: visibility & verification ---------------------------
-    "ball_conf_min": 0.5,           # BALL_CONF_MIN: reject detections below this confidence
+    "ball_conf_min": 0.2,           # floor only: tracker applies 0.5-to-start / 0.2-to-continue hysteresis
     "ball_max_jump_px": 150,        # BALL_MAX_JUMP_PX: reject jumps farther than this (px)
     "ball_min_frames": 5,           # MIN_BALL_FRAMES: below this -> status "not detected"
     "ball_trail_len": 15,           # fading trail length on the output video
@@ -156,11 +156,8 @@ def _detect_pass(input_path: str) -> Dict[str, Any]:
     pose = create_pose_detector()
     tracker = _get_tracker()
 
-    # Reset per-video static-object state so previous clips don't pollute results
-    tracker._color_blob_history.clear()
-    tracker._color_blob_consec.clear()
-    tracker._last_frame_positions = set()
-    tracker._static_positions = set()
+    # Reset all per-video detector state so previous clips don't pollute results
+    tracker.reset()
 
     mp_xy: List[Optional[np.ndarray]] = []      # (33, 2) px
     mp_vis: List[Optional[np.ndarray]] = []     # (33,)
@@ -595,7 +592,8 @@ def _filter_ball_detections(det, cfg) -> Dict[str, int]:
     Returns rejection counts.
     """
     conf_min = cfg["ball_conf_min"]
-    jump_px = cfg["ball_max_jump_px"]                   # BALL_MAX_JUMP_PX (fixed pixels)
+    jump_px = max(cfg["ball_max_jump_px"],              # BALL_MAX_JUMP_PX, scaled for large frames
+                  0.25 * max(det["width"], det["height"]))
     near_bat_px = cfg["ball_near_bat_ratio"] * min(det["width"], det["height"])
     margin = cfg["ball_body_margin"]
     raw_sources = det.get("ball_raw_source") or [None] * det["n"]

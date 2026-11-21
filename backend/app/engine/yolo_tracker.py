@@ -209,7 +209,9 @@ class CricketObjectTracker:
     """
 
     def __init__(self, model_path: Optional[str] = None):
-        self.model_path = model_path or DEFAULT_MODEL_PATH
+        self.model_path = model_path or (
+            CUSTOM_PT_MODEL if Path(CUSTOM_PT_MODEL).exists() else DEFAULT_MODEL_PATH
+        )
         # Don't report a model that isn't there (the ball report shows this name).
         if not Path(self.model_path).exists():
             self.model_path = "none (colour-blob only)"
@@ -226,9 +228,8 @@ class CricketObjectTracker:
         self._last_frame_positions: set = set()                     # positions seen in previous frame
         self._static_positions: set = set()
         self._last_accepted_pos: Optional[Tuple[float, float]] = None  # last accepted ball pos
-        self._static_run: int = 0                                   # consecutive frames at same pos
-        self._last_ball_pos: Optional[Tuple[float, float]] = None   # last accepted ball position
-        self._static_frames: int = 0                                # frames at same position
+        self._last_accepted_frame: Optional[int] = None             # frame number of that detection
+        self._frame_no: int = -1                                    # frames seen in current video
         self._STATIC_CUMULATIVE = 10     # seen in 10+ frames total -> static
         self._STATIC_CONSEC_FRAMES = 10  # seen in 10+ consecutive frames -> static
         self._STATIC_POS_TOL = 5         # px tolerance for position match (~5px static)
@@ -237,12 +238,28 @@ class CricketObjectTracker:
         self._COLOR_BLOB_MIN_CIRCULARITY = 0.80   # very strict circularity (cricket ball is perfectly round)
         # YOLO box size limit: cricket balls are small, reject boxes >1.5% of frame
         self._YOLO_MAX_BOX_AREA_RATIO = 0.015
-        # Ball confidence minimum — reject detections below this
+        # Confidence hysteresis: a detection >= BALL_CONF_MIN can start a ball
+        # track; a weaker one (>= BALL_CONF_FLOOR) is only kept when it continues
+        # a track seen within BALL_TRACK_MAX_GAP frames. Real balls dip to
+        # 0.2-0.5 when motion-blurred; isolated weak detections are rejected.
         self.BALL_CONF_MIN = 0.5
-        # Max jump pixels between consecutive frames — reject larger jumps
+        self.BALL_CONF_FLOOR = 0.2
+        self.BALL_TRACK_MAX_GAP = 3
+        # Max jump between tracked frames: the larger of this and 25% of the
+        # frame's long side (a bowled ball can move ~190 px/frame at 1080p/30fps)
         self.BALL_MAX_JUMP_PX = 150
         # Max dimension for color-blob: reject anything larger than a cricket ball would appear
         self._COLOR_BLOB_MAX_DIM = 40  # max width or height of blob in px
+
+    def reset(self) -> None:
+        """Clear all per-video state. Call before processing each new clip."""
+        self._color_blob_history.clear()
+        self._color_blob_consec.clear()
+        self._last_frame_positions = set()
+        self._static_positions = set()
+        self._last_accepted_pos = None
+        self._last_accepted_frame = None
+        self._frame_no = -1
 
     def _init_detector(self):
         if not self.model_path or not Path(self.model_path).exists():
@@ -397,7 +414,7 @@ class CricketObjectTracker:
         # --- YOLO candidates ---
         if self.yolo_model is not None:
             try:
-                res = self.yolo_model(cv_frame, verbose=False)[0]
+                res = self.yolo_model(cv_frame, conf=self.BALL_CONF_FLOOR, verbose=False)[0]
                 h, w = cv_frame.shape[:2]
                 max_box_area = (w * h) * self._YOLO_MAX_BOX_AREA_RATIO
                 for box in res.boxes:
@@ -420,65 +437,44 @@ class CricketObjectTracker:
             except Exception:
                 pass
 
-        # Update static tracking with every candidate from both detectors
+        self._frame_no += 1
+        h, w = cv_frame.shape[:2]
+
+        # Static background: per-position history (kettles, wall pictures).
+        # A moving ball never stays within STATIC_POS_TOL px long enough.
         self._update_static_tracking([(c[0], c[1], c[2]) for c in candidates])
-
-        # --- Gate 1: confidence ---
-        conf_filtered = [c for c in candidates if c[2] >= self.BALL_CONF_MIN]
-
-        # --- Gate 2: static background (within ~5px for 10+ frames) ---
-        static_filtered: List[Tuple[float, float, float, str]] = []
-        for c in conf_filtered:
-            cx, cy = c[0], c[1]
-            q = self._quantize_pos(cx, cy)
-            if q in self._static_positions:
-                continue  # known static position — reject
-            # Check if this position has been seen for 10+ consecutive frames
-            if self._last_frame_positions and any(
-                    self._near_pos(q, lq) for lq in self._last_frame_positions):
-                self._static_run += 1
-            else:
-                self._static_run = 0
-            if self._static_run >= self._STATIC_CONSEC_FRAMES:
-                self._static_positions.add(q)
-                continue
-            static_filtered.append(c)
-
-        # --- Gate 3: max jump from last accepted position ---
-        jump_filtered: List[Tuple[float, float, float, str]] = []
-        for c in static_filtered:
-            cx, cy = c[0], c[1]
-            if self._last_accepted_pos is not None:
-                dx = cx - self._last_accepted_pos[0]
-                dy = cy - self._last_accepted_pos[1]
-                dist = (dx * dx + dy * dy) ** 0.5
-                if dist > self.BALL_MAX_JUMP_PX:
-                    continue  # too far — likely false positive jumping to background
-            self._last_accepted_pos = (cx, cy)
-            jump_filtered.append(c)
-
-        if not jump_filtered:
+        candidates = [c for c in candidates
+                      if c[2] >= self.BALL_CONF_FLOOR and not self._is_static_position(c[0], c[1])]
+        if not candidates:
             return None
 
-        # Prefer colour-blob (high circularity + cricket-ball colour) over YOLO.
-        # If YOLO confidence is very high (>= 0.6), prefer YOLO instead.
-        color_blob_candidates = [c for c in jump_filtered if c[3] == "color_blob"]
-        yolo_candidates = [c for c in jump_filtered if c[3] == "yolo"]
+        # Track continuity: is there a recent accepted position to continue from?
+        jump_limit = max(self.BALL_MAX_JUMP_PX, 0.25 * max(w, h))
+        recent = (self._last_accepted_pos is not None and self._last_accepted_frame is not None
+                  and self._frame_no - self._last_accepted_frame <= self.BALL_TRACK_MAX_GAP)
 
-        if yolo_candidates:
-            best_yolo = max(yolo_candidates, key=lambda c: c[2])
-            if best_yolo[2] >= 0.60:  # high-confidence YOLO wins
-                return (best_yolo[0], best_yolo[1], best_yolo[2], "yolo")
+        def near_track(c) -> bool:
+            if not recent:
+                return False
+            dx = c[0] - self._last_accepted_pos[0]
+            dy = c[1] - self._last_accepted_pos[1]
+            return (dx * dx + dy * dy) ** 0.5 <= jump_limit
 
-        if color_blob_candidates:
-            best = max(color_blob_candidates, key=lambda c: c[2])
-            return (best[0], best[1], best[2], "color_blob")
+        continuing = [c for c in candidates if near_track(c)]
+        # Only the trained detector may start a track; colour blobs (any red
+        # object) can only continue one. Without a model, blobs may start tracks.
+        starting = [c for c in candidates if c[2] >= self.BALL_CONF_MIN
+                    and (c[3] == "yolo" or self.yolo_model is None)]
+        pool = continuing or starting
+        if not pool:
+            return None
 
-        if yolo_candidates:
-            best = max(yolo_candidates, key=lambda c: c[2])
-            return (best[0], best[1], best[2], "yolo")
-
-        return None
+        # With a trained detector, YOLO is the primary source; colour blob is backup.
+        yolo = [c for c in pool if c[3] == "yolo"]
+        best = max(yolo or pool, key=lambda c: c[2])
+        self._last_accepted_pos = (best[0], best[1])
+        self._last_accepted_frame = self._frame_no
+        return (best[0], best[1], best[2], best[3])
 
     def _detect_ball_yolo(self, cv_frame) -> Optional[List[float]]:
         det = self._detect_ball_yolo_with_conf(cv_frame)
@@ -533,12 +529,8 @@ class CricketObjectTracker:
         frames: List[Dict[str, Any]],
         video_path: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        # Reset static-object tracking state for every new video/sequence so
-        # objects from a previous clip don't pollute the current one.
-        self._color_blob_history.clear()
-        self._color_blob_consec.clear()
-        self._last_frame_positions = set()
-        self._static_positions = set()
+        # Reset all per-video detector state so a previous clip can't pollute this one.
+        self.reset()
 
         results: List[Dict[str, Any]] = []
 
@@ -561,10 +553,8 @@ class CricketObjectTracker:
                     ret, cv_frame = cap.read()
                     if not ret:
                         break
+                    # One gated call per frame (YOLO + colour blob, static/track gates)
                     ball = self._detect_ball_yolo(cv_frame)
-                    # Fallback: color-blob detection when YOLO misses the ball
-                    if ball is None:
-                        ball = self._detect_ball_color_blob(cv_frame)
                     if ball is not None:
                         # store normalized [0..1] for the FrameLandmarks schema
                         yolo_balls[idx] = [ball[0] / y_w, ball[1] / y_h]
@@ -574,9 +564,10 @@ class CricketObjectTracker:
                 use_yolo = False
                 yolo_balls = {}
 
-        # Prefer ByteTrack ball tracking when a video is available
+        # ByteTrack pass is ungated (no static/track filtering), so only use it
+        # when the gated detector above could not run.
         byte_balls: Dict[int, Dict[str, Any]] = {}
-        if video_path and Path(video_path).exists():
+        if not use_yolo and video_path and Path(video_path).exists():
             try:
                 bt = self.ball_tracker.track_balls_in_video(video_path, conf=self.ball_tracker.conf)
                 for t in bt:
@@ -591,7 +582,10 @@ class CricketObjectTracker:
 
             ball_pos = None
             ball_meta: Dict[str, Any] = {}
-            if i in byte_balls:
+            # Gated detections first; the ungated ByteTrack pass is only a fallback
+            if yolo_balls.get(i) is not None:
+                ball_pos = yolo_balls[i]
+            elif i in byte_balls:
                 ball_pos = byte_balls[i].get("ball_pos")
                 ball_meta = {
                     "ball_id": byte_balls[i].get("ball_id"),
@@ -599,8 +593,6 @@ class CricketObjectTracker:
                     "conf": byte_balls[i].get("conf"),
                     "method": byte_balls[i].get("method"),
                 }
-            elif yolo_balls.get(i) is not None:
-                ball_pos = yolo_balls[i]
             elif f.get("ball_position") is not None:
                 ball_pos = f["ball_position"]
 
