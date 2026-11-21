@@ -52,7 +52,7 @@ SHOT_CLASSIFIER_ONNX = BASE_DIR / "cricket_shot_classifier.onnx"
 SHOT_CLASSIFIER_MODE = "ml" if SHOT_CLASSIFIER_ONNX.exists() else "rule_based"
 
 # Video analysis limits
-MAX_ANALYSIS_SECONDS = 6.0  # analyse at most the first 6 s of a clip
+MAX_ANALYSIS_SECONDS = 10.0  # analyse at most the first 10 s (6 s cut off shots after a long run-up)
 MIN_POSE_FRAMES = 10        # fewer frames with a visible batter -> shot is not scored
 
 app = FastAPI(
@@ -256,6 +256,7 @@ async def analyze_video_upload(
     batter_hand: str = Form("right"),
     session_id: Optional[str] = Form(None),
     calibration: Optional[str] = Form(None),  # JSON: batterEnd, bowlerEnd, stumpTop (video px)
+    subject: Optional[str] = Form(None),      # JSON {"t": s, "x": 0-1, "y": 0-1}: the batter, tapped
     db: Session = Depends(get_db)
 ):
     """
@@ -312,6 +313,24 @@ async def analyze_video_upload(
     # Use the normalized (or original compatible) file for all downstream processing.
     processing_path = normalized_path if normalized_path else saved_path
 
+    # ── Batter selection ──────────────────────────────────────────────────
+    # If the user tapped the batter, follow that person so every pose pass
+    # analyses them (not e.g. the bowler in a behind-the-bowler clip).
+    subject_track = None
+    if subject not in (None, "", "null"):
+        try:
+            sp = json.loads(subject)
+            t_s, x_n, y_n = float(sp["t"]), float(sp["x"]), float(sp["y"])
+            if not (0 <= x_n <= 1 and 0 <= y_n <= 1 and t_s >= 0):
+                raise ValueError("x/y must be 0-1 and t >= 0")
+        except (TypeError, ValueError, KeyError) as exc:
+            raise HTTPException(status_code=422, detail={"error": "bad_subject", "reason": str(exc)})
+        from .engine.subject import track_subject
+        try:
+            subject_track = track_subject(str(processing_path), t_s, x_n, y_n)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail={"error": "batter_not_found", "reason": str(exc)})
+
     # ── Pose extraction (MediaPipe Tasks API) ─────────────────────────────
     # Every frame keeps its index/timestamp so ball positions and the video
     # stay aligned. Frames where no person is found get an empty landmark
@@ -330,7 +349,7 @@ async def analyze_video_upload(
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
     max_frames = int(round(fps * MAX_ANALYSIS_SECONDS))
 
-    detector = create_pose_detector()
+    detector = create_pose_detector(subject=subject_track)
     if detector is None:
         cap.release()
         raise HTTPException(
@@ -420,7 +439,8 @@ async def analyze_video_upload(
     # OpenPose-style skeleton overlay video (original resolution/FPS, H.264)
     try:
         pose_out = OUTPUT_DIR / f"pose_{file_id}.mp4"
-        analyze_pose_overlay(str(processing_path), str(pose_out), ball_positions=ball_positions)
+        analyze_pose_overlay(str(processing_path), str(pose_out), ball_positions=ball_positions,
+                             subject=subject_track)
         result.pose_video_url = f"/outputs/{pose_out.name}"
     except Exception:
         pass  # pose overlay is best-effort; analysis result is still returned
@@ -431,7 +451,7 @@ async def analyze_video_upload(
         cricket_out = OUTPUT_DIR / f"cricket_{file_id}.mp4"
         report = analyze_cricket_shot(
             str(processing_path), str(cricket_out),
-            shot_direction=None, batter_hand=batter_hand,
+            shot_direction=None, batter_hand=batter_hand, subject=subject_track,
         )
         result.cricket_video_url = f"/outputs/{cricket_out.name}"
         result.cricket_report_url = f"/outputs/{cricket_out.stem}.json"

@@ -31,13 +31,16 @@ export async function uploadVideoShot(
   videoFile: File,
   cameraAngle: CameraAngle,
   batterHand: BatterHand,
-  sessionId?: string
+  sessionId?: string,
+  subject?: { t: number; x: number; y: number } | null,
 ): Promise<ShotAnalysis> {
   const formData = new FormData();
   formData.append('file', videoFile);
   formData.append('camera_angle', cameraAngle);
   formData.append('batter_hand', batterHand);
   if (sessionId) formData.append('session_id', sessionId);
+  // the batter the user tapped -> backend follows that player for all pose analysis
+  if (subject) formData.append('subject', JSON.stringify(subject));
 
   const response = await fetch(`${API_BASE}/analyze-video`, {
     method: 'POST',
@@ -45,7 +48,14 @@ export async function uploadVideoShot(
   });
 
   if (!response.ok) {
-    throw new Error(`Video upload failed: ${response.statusText}`);
+    // show the backend's reason (e.g. "no person found where you tapped") when it gives one
+    let reason = response.statusText;
+    try {
+      const body = await response.json();
+      const d = body?.detail;
+      reason = typeof d === 'string' ? d : d?.reason || d?.error || reason;
+    } catch { /* not JSON */ }
+    throw new Error(`Video analysis failed: ${reason}`);
   }
   return response.json();
 }

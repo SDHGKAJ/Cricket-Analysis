@@ -46,6 +46,7 @@ SWING_BEFORE_S = 0.7
 SWING_AFTER_S = 0.5
 REACH_TORSO = 2.4       # bat (~0.85 m) + arms, in torso lengths (~0.5 m)
 EXTRAP_MAX_S = 0.5
+BALL_AFTER_S = 1.0      # with a tracked ball: contact no later than this after its last sighting
 LOCAL_CONF = 0.10       # low is safe: only boxes within reach of the hands, +/-2 frames
                         # around a loud crack in the swing (re-encodes blur the ball)
 # Search window around a sound, in frames: mostly *before* it. At impact the ball
@@ -196,6 +197,13 @@ def detect_contact(video_path: str, det: Dict[str, Any],
 
     fps = det["fps"]
     s0, peak, s1 = swing
+    # If the ball was tracked, contact must happen while it's in play: from its
+    # first sighting to BALL_AFTER_S after the last. This beats the wrist-speed
+    # window when the batter is small/distant (an early twitch can look like
+    # the swing) and rules out sounds before the ball was even bowled.
+    seen = [i for i, b in enumerate(det["balls"]) if b is not None]
+    if seen:
+        s0, s1 = seen[0], min(det["n"] - 1, seen[-1] + int(BALL_AFTER_S * fps))
     checked: List[Dict[str, Any]] = []
     for o in onsets:
         f = o["t"] * fps

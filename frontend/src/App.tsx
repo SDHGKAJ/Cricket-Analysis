@@ -3,7 +3,7 @@ import { Download, Loader2, RotateCcw, Timer } from 'lucide-react';
 import { BatterHand, CameraAngle, CricketReport, MetricStatus, ShotAnalysis } from './types/cricket';
 
 import { AppHeader, Page } from './components/AppHeader';
-import { UploadDropzone } from './components/UploadDropzone';
+import { UploadDropzone, SubjectPick } from './components/UploadDropzone';
 import { VideoPlayer, SeekRequest } from './components/VideoPlayer';
 import { PhaseTimeline } from './components/PhaseTimeline';
 import { BallTrackingPanel } from './components/BallTrackingPanel';
@@ -75,6 +75,7 @@ export const App: React.FC = () => {
   const [shot, setShot] = useState<ShotAnalysis | null>(null);
   const [report, setReport] = useState<CricketReport | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [batterPicked, setBatterPicked] = useState(false);
 
   /* Player state shared across views */
   const [view, setView] = useState<ViewId>('pose');
@@ -204,7 +205,8 @@ export const App: React.FC = () => {
     setPreviewUrl(null);
   };
 
-  const analyze = (file: File) => {
+  const analyze = (file: File, subject: SubjectPick | null = null) => {
+    setBatterPicked(!!subject);
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     setPreviewUrl(URL.createObjectURL(file)); // fallback if the server can't render video
     setFileName(file.name);
@@ -216,7 +218,7 @@ export const App: React.FC = () => {
     createBattingSession('Batter 01', cameraAngle, batterHand)
       .then((sess) => sess.id)
       .catch(() => undefined)
-      .then((sessionId) => uploadVideoShot(file, cameraAngle, batterHand, sessionId))
+      .then((sessionId) => uploadVideoShot(file, cameraAngle, batterHand, sessionId, subject))
       .then((res) => {
         setShot(res);
         setView(res.pose_video_url ? 'pose' : res.cricket_video_url ? 'hud' : 'original');
@@ -356,6 +358,7 @@ export const App: React.FC = () => {
                     videoFrames ? `${videoFrames} frames` : null,
                     cameraAngle === 'front_on' ? 'front-on' : 'side-on',
                     `${batterHand}-handed`,
+                    batterPicked ? 'batter picked by you' : null,
                   ].filter(Boolean).join(' · ')}
                 </p>
               </div>

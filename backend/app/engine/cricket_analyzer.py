@@ -143,7 +143,7 @@ def _get_tracker():
 # ════════════════════════════════════════════════════════════════════════
 # PASS 1 — detection: pose (33 + COCO-18), YOLO ball, kinematic bat tip
 # ════════════════════════════════════════════════════════════════════════
-def _detect_pass(input_path: str) -> Dict[str, Any]:
+def _detect_pass(input_path: str, subject=None) -> Dict[str, Any]:
     import cv2
 
     cap = cv2.VideoCapture(input_path)
@@ -154,7 +154,7 @@ def _detect_pass(input_path: str) -> Dict[str, Any]:
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    pose = create_pose_detector()
+    pose = create_pose_detector(subject=subject)   # subject = tapped batter, if any
     tracker = _get_tracker()
 
     # Reset all per-video detector state so previous clips don't pollute results
@@ -1363,6 +1363,7 @@ def analyze_cricket_shot(
     shot_direction: Optional[float] = None,
     batter_hand: str = "right",
     debug_ball: bool = False,
+    subject=None,
 ) -> dict:
     """Analyze a cricket batting shot and write an HUD-annotated video.
 
@@ -1385,7 +1386,7 @@ def analyze_cricket_shot(
         batter_hand = "right"
 
     # 1) detect pose + raw ball + bat tip
-    det = _detect_pass(input_path)
+    det = _detect_pass(input_path, subject)
     if det["n"] == 0:
         raise ValueError(f"No frames read from video: {input_path}")
 

@@ -91,3 +91,12 @@ def test_ball_seen_just_before_the_crack_not_credited_to_an_earlier_sound(sounds
     f, rep = C.detect_contact("x.mp4", det, _fallback)
     assert f == 40 or f == 41
     assert [c["passes"] for c in rep["candidates"]] == [False, True]
+
+
+def test_sound_before_the_ball_appears_is_not_contact(sounds):
+    """A loud sound during the bowler's run-up (before the ball is ever seen)
+    can't be the hit, even if the batter's hands happen to move then."""
+    sounds([{"t": 36 / FPS, "onset_db": 20, "level_db": 30}])        # frame 36, swing window
+    det = _det(ball_frames=[(50, (900, 700)), (52, (880, 690))])     # ball first seen at frame 50
+    f, rep = C.detect_contact("x.mp4", det, _fallback)
+    assert f is None and rep["audio"]["candidates"] == []

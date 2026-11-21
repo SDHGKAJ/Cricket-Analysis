@@ -351,14 +351,23 @@ export interface FeedbackItem {
   line: string;
 }
 
+/** Classify one backend feedback line (phrases from cricket_analyzer._build_feedback). */
 function lineStatus(line: string): MetricStatus {
   const lower = line.toLowerCase();
+  const num = (re: RegExp) => { const m = lower.match(re); return m ? Number(m[1]) : null; };
+
   if (lower.includes('not detected') || lower.includes('not measurable')) {
     if (lower.includes('partial') || lower.includes('start ')) return 'medium';
     return 'not_detected';
   }
-  if (lower.includes('falling') || lower.includes('turned away') ||
-      lower.includes('early') || lower.includes('late')) return 'bad';
+  // "Front foot off shot direction by 109°" — same thresholds as the Front foot tile
+  const off = num(/off shot direction by (\d+)/);
+  if (off != null) return off > 40 ? 'bad' : off >= 20 ? 'medium' : 'good';
+  // "Eyes on ball in 35% of pre-contact frames"
+  const eyes = num(/eyes on ball in (\d+)%/);
+  if (eyes != null) return eyes >= 70 ? 'good' : eyes >= 40 ? 'medium' : 'bad';
+  if (lower.includes('head fell') || lower.includes('falling') || lower.includes('turned away') ||
+      /contact (early|late)/.test(lower)) return 'bad';
   if (lower.includes('back foot') || lower.includes('misaligned')) return 'medium';
   return 'good';
 }

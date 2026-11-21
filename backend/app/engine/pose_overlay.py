@@ -98,35 +98,48 @@ MODEL_URL = (
 )
 
 
-def _ensure_model() -> Path:
-    """Return the local pose_landmarker.task path, downloading it if missing."""
-    if MODEL_PATH.exists() and MODEL_PATH.stat().st_size > 0:
-        return MODEL_PATH
-    MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+# "heavy" is ~3x slower but finds small / distant people (broadcast batters)
+# more often; used for training-data extraction, the API keeps "full".
+MODEL_VARIANTS = {
+    "full": (MODEL_PATH, MODEL_URL),
+    "heavy": (
+        MODEL_PATH.parent / "pose_landmarker_heavy.task",
+        "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
+        "pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task",
+    ),
+}
+
+
+def _ensure_model(variant: str = "full") -> Path:
+    """Return the local .task path for a model variant, downloading it if missing."""
+    path, url = MODEL_VARIANTS[variant]
+    if path.exists() and path.stat().st_size > 0:
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
     try:
         import urllib.request
-        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+        urllib.request.urlretrieve(url, path)
     except Exception as exc:  # noqa: BLE001 - surface a clear message
-        if MODEL_PATH.exists():
-            MODEL_PATH.unlink(missing_ok=True)
+        if path.exists():
+            path.unlink(missing_ok=True)
         raise RuntimeError(
             f"Could not download the MediaPipe pose model. Download it manually "
-            f"from {MODEL_URL} and save it as {MODEL_PATH}"
+            f"from {url} and save it as {path}"
         ) from exc
-    return MODEL_PATH
+    return path
 
 
 class _TasksPoseDetector:
     """MediaPipe Tasks PoseLandmarker (VIDEO mode) -> 33 landmarks per frame."""
 
-    def __init__(self, min_conf: float = 0.5) -> None:
+    def __init__(self, min_conf: float = 0.5, variant: str = "full") -> None:
         import cv2  # noqa: F401  (ensures OpenCV is importable before use)
         import mediapipe as mp
         from mediapipe.tasks import python as mp_python
         from mediapipe.tasks.python import vision
 
         options = vision.PoseLandmarkerOptions(
-            base_options=mp_python.BaseOptions(model_asset_path=str(_ensure_model())),
+            base_options=mp_python.BaseOptions(model_asset_path=str(_ensure_model(variant))),
             running_mode=vision.RunningMode.VIDEO,
             num_poses=1,
             min_pose_detection_confidence=min_conf,
@@ -184,14 +197,20 @@ class _LegacyPoseDetector:
         self._pose.close()
 
 
-def create_pose_detector(min_conf: float = 0.5):
+def create_pose_detector(min_conf: float = 0.5, variant: str = "full", subject=None):
     """Build the best available pose detector; None if mediapipe is unusable.
 
     Returns an object with .detect(frame_bgr, timestamp_ms) -> landmarks | None
-    and .close().
+    and .close(). With ``subject`` (a subject.SubjectTrack — the batter the user
+    tapped) pose runs on that person's crop only, so another player can't be
+    picked up instead.
     """
     try:
-        return _TasksPoseDetector(min_conf)
+        det = _TasksPoseDetector(min_conf, variant)
+        if subject is not None:
+            from .subject import SubjectPoseDetector
+            return SubjectPoseDetector(det, subject)
+        return det
     except Exception:
         pass
     try:
@@ -389,7 +408,8 @@ def _open_writer(output_path: str, fps: float, width: int, height: int):
 def analyze_video(input_path: str, output_path: str,
                   ball_positions: Optional[List[Optional[Tuple[float, float, float]]]] = None,
                   ball_conf_min: float = BALL_CONF_MIN,
-                  ball_trail_len: int = BALL_TRAIL_LEN) -> str:
+                  ball_trail_len: int = BALL_TRAIL_LEN,
+                  subject=None) -> str:
     """Annotate a video with an OpenPose-style skeleton overlay.
 
     Detects the person frame-by-frame (MediaPipe Pose mapped to COCO-18),
@@ -431,8 +451,9 @@ def analyze_video(input_path: str, output_path: str,
         writer.release()
         raise RuntimeError(f"Could not create video writer for: {output_path}")
 
-    # Pose estimator: MediaPipe Tasks API (legacy mp.solutions fallback)
-    pose = create_pose_detector()
+    # Pose estimator: MediaPipe Tasks API (legacy mp.solutions fallback);
+    # restricted to the tapped batter when a subject track is given
+    pose = create_pose_detector(subject=subject)
 
     smoothed: Optional[np.ndarray] = None
     missed_frames = 0

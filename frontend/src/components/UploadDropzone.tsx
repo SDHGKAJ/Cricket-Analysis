@@ -1,8 +1,15 @@
 import React, { useCallback, useRef, useState } from 'react';
-import { Film, UploadCloud, X } from 'lucide-react';
+import { Crosshair, Film, UploadCloud, X } from 'lucide-react';
+
+/** The batter the user tapped: video time (s) and position (0-1 of the picture). */
+export interface SubjectPick {
+  t: number;
+  x: number;
+  y: number;
+}
 
 interface UploadDropzoneProps {
-  onAnalyze: (file: File) => void;
+  onAnalyze: (file: File, subject: SubjectPick | null) => void;
   error?: string | null;
   setError: (err: string | null) => void;
 }
@@ -28,7 +35,10 @@ export const UploadDropzone: React.FC<UploadDropzoneProps> = ({ onAnalyze, error
   const [dragActive, setDragActive] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [url, setUrl] = useState<string | null>(null);
+  const [picking, setPicking] = useState(false);
+  const [subject, setSubject] = useState<SubjectPick | null>(null);
   const input = useRef<HTMLInputElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
 
   const select = useCallback((f?: File | null) => {
     if (!f) return;
@@ -36,6 +46,8 @@ export const UploadDropzone: React.FC<UploadDropzoneProps> = ({ onAnalyze, error
     if (err) { setError(err); return; }
     setError(null);
     setFile(f);
+    setSubject(null);
+    setPicking(false);
     setUrl((old) => { if (old) URL.revokeObjectURL(old); return URL.createObjectURL(f); });
   }, [setError]);
 
@@ -43,7 +55,27 @@ export const UploadDropzone: React.FC<UploadDropzoneProps> = ({ onAnalyze, error
     if (url) URL.revokeObjectURL(url);
     setFile(null);
     setUrl(null);
+    setSubject(null);
+    setPicking(false);
     if (input.current) input.current.value = '';
+  };
+
+  const startPicking = () => {
+    videoRef.current?.pause();
+    setPicking(true);
+  };
+
+  /** Tap position as 0-1 of the video picture, plus the paused time. */
+  const onPick = (e: React.MouseEvent<HTMLButtonElement>) => {
+    const v = videoRef.current;
+    if (!v) return;
+    const r = v.getBoundingClientRect();
+    setSubject({
+      t: v.currentTime,
+      x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
+      y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)),
+    });
+    setPicking(false);
   };
 
   return (
@@ -84,15 +116,68 @@ export const UploadDropzone: React.FC<UploadDropzoneProps> = ({ onAnalyze, error
       ) : (
         <div className="card overflow-hidden">
           <div className="bg-black flex justify-center">
-            {url && <video src={url} controls playsInline muted className="max-h-[50vh] w-auto max-w-full" />}
+            {url && (
+              <div className="relative inline-block max-w-full">
+                <video
+                  ref={videoRef}
+                  src={url}
+                  controls={!picking}
+                  playsInline
+                  muted
+                  className="block max-h-[50vh] w-auto max-w-full"
+                />
+                {/* tap layer: only while picking, so normal controls work otherwise */}
+                {picking && (
+                  <button
+                    type="button"
+                    onClick={onPick}
+                    className="absolute inset-0 cursor-crosshair bg-accent/10 ring-2 ring-inset ring-accent"
+                    aria-label="Tap the batter in the video"
+                  />
+                )}
+                {subject && (
+                  <span
+                    className="absolute w-5 h-5 -ml-2.5 -mt-2.5 rounded-full border-2 border-white bg-accent shadow pointer-events-none"
+                    style={{ left: `${subject.x * 100}%`, top: `${subject.y * 100}%` }}
+                    aria-hidden="true"
+                  />
+                )}
+              </div>
+            )}
           </div>
+
+          {/* Batter selection */}
+          <div className="px-3 pt-3 flex flex-wrap items-center gap-2 text-[13px]">
+            <Crosshair className="w-4 h-4 text-accent shrink-0" />
+            <span className="flex-1 min-w-[200px]">
+              {picking ? (
+                <span className="text-ink">Pause where the batter is visible, then tap the batter.</span>
+              ) : subject ? (
+                <span className="text-ink">Batter picked at {subject.t.toFixed(1)} s — the analysis will follow this player.</span>
+              ) : (
+                <span className="text-body">
+                  Is someone else (bowler, umpire) bigger in the frame than the batter?{' '}
+                  <span className="text-mute">Pick the batter so they're analysed.</span>
+                </span>
+              )}
+            </span>
+            {picking ? (
+              <button className="btn btn-ghost" onClick={() => setPicking(false)}>Cancel</button>
+            ) : (
+              <>
+                {subject && <button className="btn btn-ghost" onClick={() => setSubject(null)}>Clear</button>}
+                <button className="btn btn-ghost" onClick={startPicking}>{subject ? 'Re-pick' : 'Pick batter'}</button>
+              </>
+            )}
+          </div>
+
           <div className="p-3 flex flex-wrap items-center gap-3">
             <Film className="w-4 h-4 text-mute shrink-0" />
             <span className="flex-1 min-w-0 text-[13px] text-ink truncate">
               {file.name} <span className="text-mute">· {(file.size / (1024 * 1024)).toFixed(1)} MB</span>
             </span>
             <button className="btn btn-ghost" onClick={clear}>Change</button>
-            <button className="btn btn-primary w-full sm:w-auto" onClick={() => onAnalyze(file)}>
+            <button className="btn btn-primary w-full sm:w-auto" disabled={picking} onClick={() => onAnalyze(file, subject)}>
               Analyse shot
             </button>
           </div>
