@@ -7,20 +7,17 @@ interface StatusBadgeProps {
   className?: string;
 }
 
-const STYLES: Record<MetricStatus, { className: string; defaultLabel: string }> = {
-  good: { className: 'badge badge-good', defaultLabel: 'Good' },
-  medium: { className: 'badge badge-medium', defaultLabel: 'Medium' },
-  bad: { className: 'badge badge-bad', defaultLabel: 'Bad' },
-  not_detected: { className: 'badge badge-none', defaultLabel: 'Not detected' },
+const DEFAULT_LABEL: Record<MetricStatus, string> = {
+  good: 'Good',
+  medium: 'Fair',
+  bad: 'Needs work',
+  not_detected: 'Not measured',
 };
 
-export const StatusBadge: React.FC<StatusBadgeProps> = ({ status, label, className = '' }) => {
-  const cfg = STYLES[status] ?? STYLES.not_detected;
-  return (
-    <span className={`${cfg.className} ${className}`} aria-label={`${cfg.defaultLabel}: ${label ?? ''}`}>
-      {label ?? cfg.defaultLabel}
-    </span>
-  );
-};
+export const StatusBadge: React.FC<StatusBadgeProps> = ({ status, label, className = '' }) => (
+  <span className={`pill pill-${status in DEFAULT_LABEL ? status : 'not_detected'} ${className}`}>
+    {label ?? DEFAULT_LABEL[status]}
+  </span>
+);
 
 export default StatusBadge;

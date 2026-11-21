@@ -1,56 +1,51 @@
 import React from 'react';
-import { MetricTileModel } from '../types/cricket';
-import { DonutRing } from './DonutRing';
+import { MetricStatus, MetricTileModel } from '../types/cricket';
 import { StatusBadge } from './StatusBadge';
 
-interface MetricTileProps {
-  tile: MetricTileModel;
-}
+const BAR: Record<MetricStatus, string> = {
+  good: 'var(--good)',
+  medium: 'var(--warn)',
+  bad: 'var(--bad)',
+  not_detected: 'var(--line-strong)',
+};
 
-/**
- * MetricTile — flat vivid gradient tile with a central donut ring,
- * big value inside, name + detail at bottom, small status badge,
- * confidence label. Not-detected tiles are dark grey with dashed ring.
- */
-export const MetricTile: React.FC<MetricTileProps> = ({ tile }) => {
-  const notDetected = tile.status === 'not_detected';
-  const fillClass = `tile-${tile.accent}-fill`;
+const CONF_LEVEL: Record<string, number> = { Low: 1, Medium: 2, High: 3 };
+
+/** MetricTile — one measured metric: value, status, what it means, confidence. */
+export const MetricTile: React.FC<{ tile: MetricTileModel }> = ({ tile }) => {
+  const missing = tile.status === 'not_detected' || tile.value == null;
+  const level = CONF_LEVEL[tile.confidence] ?? 1;
 
   return (
-    <article className="tile fade-in" role="region" aria-label={`${tile.name}: ${tile.value ?? 'not detected'}`}>
-      <div className={`tile-fill ${fillClass}`} />
-      <div className="relative z-10 p-5 h-full flex flex-col">
-        <div className="flex items-center justify-between mb-2">
-          <h3 className="text-xs font-bold text-white tracking-tighter uppercase">{tile.name}</h3>
-          <StatusBadge status={tile.status} label={tile.badge} className="flex-shrink-0" />
-        </div>
+    <article
+      className="card relative overflow-hidden p-4 pl-5 flex flex-col gap-2 animate-fade-in"
+      aria-label={`${tile.name}: ${tile.value ?? 'not measured'}`}
+    >
+      <span className="absolute left-0 top-0 bottom-0 w-1" style={{ background: BAR[tile.status] }} aria-hidden="true" />
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="flex items-center gap-2 text-[13px] font-semibold text-ink">
+          <span className="text-mute">{tile.icon}</span>
+          {tile.name}
+        </h3>
+        <StatusBadge status={tile.status} label={tile.badge} />
+      </div>
 
-        {/* Donut ring + value */}
-        <div className="relative flex-1 flex items-center justify-center mb-3">
-          <DonutRing
-            score={notDetected || tile.value == null ? null : Number(tile.value.replace(/[^\d.]/g, '')) || null}
-            size={88}
-            accent={tile.accent}
-          />
-          {notDetected ? (
-            <span className="absolute text-[10px] font-bold text-white/90">—</span>
-          ) : (
-            <span className="absolute text-xl font-bold text-white font-numeric leading-none">
-              {tile.value}
-            </span>
-          )}
-        </div>
+      <div className={`num leading-none ${missing ? 'text-3xl text-mute' : 'text-[40px] text-ink'}`}>
+        {missing ? '—' : tile.value}
+      </div>
 
-        {/* Detail line */}
-        <p className="text-[12px] text-white/90 leading-relaxed mb-3 flex-1">
-          {notDetected ? (tile.reason ?? 'Metric not available for this clip.') : tile.explanation}
-        </p>
+      <p className="text-[13px] text-body leading-snug flex-1">
+        {missing ? tile.reason ?? 'Not measurable in this clip.' : tile.explanation}
+      </p>
 
-        {/* Confidence label */}
-        <div className="flex items-center gap-1 text-[11px] text-white/60 font-numeric">
-          <span className="uppercase tracking-wide font-semibold">Confidence</span>
-          <span className="text-white/40 font-medium">{tile.confidence}</span>
-        </div>
+      <div className="flex items-center gap-2 text-[11px] text-mute" title={`Confidence: ${tile.confidence}`}>
+        <span>Confidence</span>
+        <span className="flex gap-0.5" aria-hidden="true">
+          {[1, 2, 3].map((i) => (
+            <span key={i} className="w-3 h-1.5 rounded-sm" style={{ background: i <= level ? 'var(--body)' : 'var(--line-strong)' }} />
+          ))}
+        </span>
+        <span>{tile.confidence}</span>
       </div>
     </article>
   );

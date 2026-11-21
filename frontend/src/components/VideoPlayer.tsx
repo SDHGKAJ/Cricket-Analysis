@@ -1,377 +1,334 @@
-import React, { useRef, useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { ChevronLeft, ChevronRight, Pause, Play } from 'lucide-react';
 import { FrameLandmarks } from '../types/cricket';
 
 /**
- * VideoPlayer — shared custom player:
- *   play/pause · speed 0.25x / 0.5x / 1x · frame step · scrubber
- *   optional canvas skeleton overlay synced to playback time
- * Caller owns frame/time state.
+ * VideoPlayer — one player for every view.
+ *  - sizes itself to the clip's real aspect ratio (portrait phone clips stay tall)
+ *  - touch-friendly controls: tap video to play/pause, frame step, 0.25/0.5/1x
+ *  - optional live skeleton overlay drawn from backend landmarks
+ *  - reports playback time to the parent (throttled) and accepts external seeks
  */
+export interface SeekRequest {
+  ms: number;
+  id: number; // bump to re-trigger a seek to the same time
+}
+
 interface VideoPlayerProps {
-  src: string | null;
+  src: string;
   totalFrames: number;
-  currentTimeMs: number;
-  onSeekTime: (ms: number) => void;
+  initialTimeMs?: number;
+  seek?: SeekRequest | null;
+  onTime: (ms: number) => void;
+  onDuration?: (ms: number) => void;
+  onAspect?: (aspect: number) => void;
   playbackRate: number;
   onRateChange: (rate: number) => void;
-  playing: boolean;
-  onTogglePlay: () => void;
-  className?: string;
-  /** Called when the video reaches its end */
-  onVideoEnded?: () => void;
-  /** Per-frame pose landmarks from backend (normalised 0–1 coords) */
   landmarks?: FrameLandmarks[];
-  /** Show/hide the skeleton overlay */
   showSkeleton?: boolean;
+  autoPlay?: boolean;
 }
 
 const SPEEDS = [0.25, 0.5, 1];
 
-function timeToFrame(currentTime: number, duration: number, total: number): number {
-  if (!duration || total <= 1) return 0;
-  return Math.round((currentTime / duration) * (total - 1));
-}
-
-/* ───────────────────────────────────────────────────────────────────────────
-   MediaPipe pose landmark indices (33 points, normalised 0–1)
-   0 nose, 11 L-shoulder, 12 R-shoulder,
-   13 L-elbow, 14 R-elbow, 15 L-wrist, 16 R-wrist,
-   23 L-hip, 24 R-hip, 25 L-knee, 26 R-knee, 27 L-ankle, 28 R-ankle
-   ─────────────────────────────────────────────────────────────────────────── */
 const L_SHOULDER = 11, R_SHOULDER = 12, L_ELBOW = 13, R_ELBOW = 14,
-      L_WRIST = 15, R_WRIST = 16, L_HIP = 23, R_HIP = 24,
-      L_KNEE = 25, R_KNEE = 26, L_ANKLE = 27, R_ANKLE = 28;
+  L_WRIST = 15, R_WRIST = 16, L_HIP = 23, R_HIP = 24,
+  L_KNEE = 25, R_KNEE = 26, L_ANKLE = 27, R_ANKLE = 28;
 
 const LIMBS: [number, number][] = [
-  [L_SHOULDER, R_SHOULDER],       // shoulders
-  [L_SHOULDER, L_ELBOW], [L_ELBOW, L_WRIST],   // left arm
-  [R_SHOULDER, R_ELBOW], [R_ELBOW, R_WRIST],   // right arm
-  [L_SHOULDER, L_HIP], [R_SHOULDER, R_HIP],    // torso
-  [L_HIP, R_HIP],                             // hip line
-  [L_HIP, L_KNEE], [L_KNEE, L_ANKLE],         // left leg
-  [R_HIP, R_KNEE], [R_KNEE, R_ANKLE],         // right leg
+  [L_SHOULDER, R_SHOULDER],
+  [L_SHOULDER, L_ELBOW], [L_ELBOW, L_WRIST],
+  [R_SHOULDER, R_ELBOW], [R_ELBOW, R_WRIST],
+  [L_SHOULDER, L_HIP], [R_SHOULDER, R_HIP],
+  [L_HIP, R_HIP],
+  [L_HIP, L_KNEE], [L_KNEE, L_ANKLE],
+  [R_HIP, R_KNEE], [R_KNEE, R_ANKLE],
 ];
 
-/* Joint triples [A, B, C] — angle measured at B */
 const JOINT_ANGLES = [
-  { id: 'l-elbow', pts: [L_SHOULDER, L_ELBOW, L_WRIST], label: 'L elbow' },
-  { id: 'r-elbow', pts: [R_SHOULDER, R_ELBOW, R_WRIST], label: 'R elbow' },
-  { id: 'l-shoulder', pts: [L_HIP, L_SHOULDER, L_ELBOW], label: 'L shoulder' },
-  { id: 'r-shoulder', pts: [R_HIP, R_SHOULDER, R_ELBOW], label: 'R shoulder' },
-  { id: 'l-hip', pts: [L_SHOULDER, L_HIP, L_KNEE], label: 'L hip' },
-  { id: 'r-hip', pts: [R_SHOULDER, R_HIP, R_KNEE], label: 'R hip' },
-  { id: 'l-knee', pts: [L_HIP, L_KNEE, L_ANKLE], label: 'L knee' },
-  { id: 'r-knee', pts: [R_HIP, R_KNEE, R_ANKLE], label: 'R knee' },
+  { pts: [L_SHOULDER, L_ELBOW, L_WRIST], label: 'L elbow' },
+  { pts: [R_SHOULDER, R_ELBOW, R_WRIST], label: 'R elbow' },
+  { pts: [L_HIP, L_KNEE, L_ANKLE], label: 'L knee' },
+  { pts: [R_HIP, R_KNEE, R_ANKLE], label: 'R knee' },
 ];
 
-interface Point { x: number; y: number; visibility?: number }
+interface Pt { x: number; y: number; visibility?: number }
 
-/** Angle at point B between A-B-C, in degrees. */
-function angleAt(a: Point | null, b: Point | null, c: Point | null): number | null {
-  if (!a || !b || !c) return null;
-  const v1x = a.x - b.x, v1y = a.y - b.y;
-  const v2x = c.x - b.x, v2y = c.y - b.y;
-  const dot = v1x * v2x + v1y * v2y;
+function angleAt(a: Pt, b: Pt, c: Pt): number | null {
+  const v1x = a.x - b.x, v1y = a.y - b.y, v2x = c.x - b.x, v2y = c.y - b.y;
   const n1 = Math.hypot(v1x, v1y), n2 = Math.hypot(v2x, v2y);
   if (n1 < 1e-6 || n2 < 1e-6) return null;
-  let cos = dot / (n1 * n2);
-  cos = Math.max(-1, Math.min(1, cos));
+  const cos = Math.max(-1, Math.min(1, (v1x * v2x + v1y * v2y) / (n1 * n2)));
   return (Math.acos(cos) * 180) / Math.PI;
 }
+
+function nearestFrame(frames: FrameLandmarks[], ms: number): FrameLandmarks | null {
+  let best: FrameLandmarks | null = null;
+  let diff = Infinity;
+  for (const f of frames) {
+    const d = Math.abs(f.timestamp_ms - ms);
+    if (d < diff) { diff = d; best = f; }
+  }
+  return best;
+}
+
+const fmt = (ms: number) => (ms / 1000).toFixed(2);
 
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   src,
   totalFrames,
-  currentTimeMs,
-  onSeekTime,
+  initialTimeMs = 0,
+  seek,
+  onTime,
+  onDuration,
+  onAspect,
   playbackRate,
   onRateChange,
-  playing,
-  onTogglePlay,
-  onVideoEnded,
-  className = '',
   landmarks,
-  showSkeleton = true,
+  showSkeleton = false,
+  autoPlay = true,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [duration, setDuration] = useState(0);
-  const [isPaused, setIsPaused] = useState(true);
-  const [vidW, setVidW] = useState(0);
-  const [vidH, setVidH] = useState(0);
-  const [videoError, setVideoError] = useState<string | null>(null);
-  /** true when currentTimeMs change came from a user scrub (scrubber / step) → needs a video seek */
-  const isUserSeek = useRef(false);
+  const rafRef = useRef<number | null>(null);
+  const lastReport = useRef(0);
 
-  /* Canvas drawing loop — redraw skeleton every animation frame while playing */
-  const drawSkeleton = useCallback(() => {
+  const [paused, setPaused] = useState(true);
+  const [durationMs, setDurationMs] = useState(0);
+  const [timeMs, setTimeMs] = useState(initialTimeMs);
+  const [aspect, setAspect] = useState(16 / 9);
+  const [error, setError] = useState<string | null>(null);
+
+  const drawOverlay = useCallback(() => {
     const canvas = canvasRef.current;
     const video = videoRef.current;
-    if (!canvas || !video || !showSkeleton || !landmarks || landmarks.length === 0) return;
-
+    if (!canvas || !video) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
+    const w = video.videoWidth, h = video.videoHeight;
+    if (!w || !h) return;
+    if (canvas.width !== w) canvas.width = w;
+    if (canvas.height !== h) canvas.height = h;
+    ctx.clearRect(0, 0, w, h);
+    if (!showSkeleton || !landmarks?.length) return;
 
-    // Match canvas to video element's rendered size
-    canvas.width = video.videoWidth || vidW;
-    canvas.height = video.videoHeight || vidH;
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    // Find the landmark frame closest to current video time
-    const curTime = video.currentTime * 1000; // ms
-    let best: FrameLandmarks | null = null;
-    let bestDiff = Infinity;
-    for (const fr of landmarks) {
-      const diff = Math.abs(fr.timestamp_ms - curTime);
-      if (diff < bestDiff) {
-        bestDiff = diff;
-        best = fr;
-      }
-    }
-    if (!best) return;
-
-    const pts: (Point | null)[] = best.landmarks.map((lm) => ({
-      x: lm.x,
-      y: lm.y,
-      visibility: lm.visibility,
-    }));
-
-    const VIS_MIN = 0.15;
-    const JOINT_R = 6;
-    const LIMB_W = 4;
+    const fr = nearestFrame(landmarks, video.currentTime * 1000);
+    if (!fr) return;
+    const pts = fr.landmarks as Pt[];
+    const vis = (p?: Pt) => !!p && (p.visibility ?? 1) >= 0.15;
+    const scale = Math.max(1, Math.min(w, h) / 480);
 
     ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-
-    // Draw limbs
-    ctx.strokeStyle = 'rgba(31, 181, 214, 0.8)';
-    ctx.lineWidth = LIMB_W;
+    ctx.strokeStyle = 'rgba(91, 140, 255, 0.9)';
+    ctx.lineWidth = 3.5 * scale;
     for (const [i, j] of LIMBS) {
-      const p1 = pts[i], p2 = pts[j];
-      if (!p1 || !p2) continue;
-      if ((p1.visibility ?? 1) < VIS_MIN || (p2.visibility ?? 1) < VIS_MIN) continue;
+      const a = pts[i], b = pts[j];
+      if (!vis(a) || !vis(b)) continue;
       ctx.beginPath();
-      ctx.moveTo(p1.x * canvas.width, p1.y * canvas.height);
-      ctx.lineTo(p2.x * canvas.width, p2.y * canvas.height);
+      ctx.moveTo(a.x * w, a.y * h);
+      ctx.lineTo(b.x * w, b.y * h);
       ctx.stroke();
     }
-
-    // Draw joints + angle labels
-    ctx.fillStyle = '#1FB5D6';
-    for (const { id, pts: triple, label } of JOINT_ANGLES) {
-      const [ai, bi, ci] = triple;
+    for (const p of pts) {
+      if (!vis(p)) continue;
+      ctx.beginPath();
+      ctx.arc(p.x * w, p.y * h, 3 * scale, 0, Math.PI * 2);
+      ctx.fillStyle = '#F3F5F8';
+      ctx.fill();
+    }
+    ctx.font = `600 ${11 * scale}px Inter, system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (const { pts: [ai, bi, ci], label } of JOINT_ANGLES) {
       const a = pts[ai], b = pts[bi], c = pts[ci];
-      if (!a || !b || !c) continue;
-      if ((a.visibility ?? 1) < VIS_MIN || (b.visibility ?? 1) < VIS_MIN || (c.visibility ?? 1) < VIS_MIN) continue;
-
-      // joint dot with white glow behind for visibility on any background
-      ctx.beginPath();
-      ctx.arc(b.x * canvas.width, b.y * canvas.height, JOINT_R + 1.5, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(b.x * canvas.width, b.y * canvas.height, JOINT_R, 0, Math.PI * 2);
-      ctx.fillStyle = '#1FB5D6';
-      ctx.fill();
-
-      // angle label above the joint
+      if (!vis(a) || !vis(b) || !vis(c)) continue;
       const ang = angleAt(a, b, c);
-      if (ang != null) {
-        const angleRounded = Math.round(ang);
-        const lx = b.x * canvas.width;
-        const ly = b.y * canvas.height - 10;
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
-        ctx.fillRect(lx - 22, ly - 14, 44, 16);
-        ctx.fillStyle = '#FFFFFF';
-        ctx.font = 'bold 10px system-ui, -apple-system, sans-serif';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(`${label} ${angleRounded}°`, lx, ly);
-        ctx.fillStyle = '#1FB5D6';
-      }
+      if (ang == null) continue;
+      const text = `${label} ${Math.round(ang)}°`;
+      const tw = ctx.measureText(text).width + 10 * scale;
+      const x = b.x * w + 14 * scale + tw / 2, y = b.y * h;
+      ctx.fillStyle = 'rgba(13, 16, 21, 0.75)';
+      ctx.fillRect(x - tw / 2, y - 9 * scale, tw, 18 * scale);
+      ctx.fillStyle = '#F3F5F8';
+      ctx.fillText(text, x, y);
     }
-  }, [landmarks, showSkeleton, vidW, vidH]);
+  }, [landmarks, showSkeleton]);
 
-  useEffect(() => {
+  const report = useCallback((force = false) => {
     const video = videoRef.current;
     if (!video) return;
-    if (playing) {
-      video.play().catch(() => {});
-    } else {
-      video.pause();
+    const ms = video.currentTime * 1000;
+    const now = performance.now();
+    if (force || now - lastReport.current > 60) {
+      lastReport.current = now;
+      setTimeMs(ms);
+      onTime(ms);
     }
-  }, [playing]);
+  }, [onTime]);
+
+  /* Animation loop while playing: smooth overlay + playhead */
+  const tick = useCallback(() => {
+    drawOverlay();
+    report();
+    rafRef.current = requestAnimationFrame(tick);
+  }, [drawOverlay, report]);
 
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    video.playbackRate = playbackRate;
+    if (paused) {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+      drawOverlay();
+      report(true);
+      return;
+    }
+    rafRef.current = requestAnimationFrame(tick);
+    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
+  }, [paused, tick, drawOverlay, report]);
+
+  useEffect(() => { drawOverlay(); }, [drawOverlay]);
+
+  useEffect(() => {
+    if (videoRef.current) videoRef.current.playbackRate = playbackRate;
   }, [playbackRate]);
 
+  /* External seek (phase timeline, ball strip) */
   useEffect(() => {
     const video = videoRef.current;
+    if (!video || !seek) return;
+    video.currentTime = seek.ms / 1000;
+    report(true);
+  }, [seek, report]);
+
+  const onLoaded = () => {
+    const video = videoRef.current;
     if (!video) return;
-    // Only seek the video on user-initiated scrubs. During natural playback
-    // the video drives itself; React only reads time via timeupdate. Seeking
-    // on every currentTimeMs change pauses the video, which is why the video
-    // appeared stuck after ~100ms of playback.
-    if (isUserSeek.current) {
-      isUserSeek.current = false;
-      video.currentTime = currentTimeMs / 1000;
-      if (playing) {
-        video.play().catch(() => {});
-      }
+    if (video.videoWidth && video.videoHeight) {
+      const a = video.videoWidth / video.videoHeight;
+      setAspect(a);
+      onAspect?.(a);
     }
-  }, [currentTimeMs, playing]);
+    const d = video.duration * 1000;
+    if (Number.isFinite(d)) { setDurationMs(d); onDuration?.(d); }
+    video.playbackRate = playbackRate;
+    if (initialTimeMs > 0 && initialTimeMs < d) video.currentTime = initialTimeMs / 1000;
+    if (autoPlay) video.play().catch(() => {});
+  };
 
-  const handleLoadedMetadata = useCallback(() => {
+  const togglePlay = () => {
     const video = videoRef.current;
     if (!video) return;
-    setDuration(video.duration);
-    setVidW(video.videoWidth);
-    setVidH(video.videoHeight);
-  }, []);
+    if (video.paused || video.ended) video.play().catch(() => {});
+    else video.pause();
+  };
 
-  const handleTimeUpdate = useCallback(() => {
+  const fps = durationMs > 0 && totalFrames > 1 ? totalFrames / (durationMs / 1000) : 30;
+  const stepFrame = (dir: 1 | -1) => {
     const video = videoRef.current;
-    if (!video || !duration) return;
-    const f = timeToFrame(video.currentTime, duration, totalFrames);
-    const ms = (f / Math.max(1, totalFrames - 1)) * duration;
-    setIsPaused(video.paused);
-    onSeekTime(ms);
-    drawSkeleton();
-  }, [duration, totalFrames, onSeekTime, drawSkeleton]);
+    if (!video) return;
+    video.pause();
+    video.currentTime = Math.max(0, Math.min(video.duration || 0, video.currentTime + dir / fps));
+  };
 
-  const handlePause = useCallback(() => setIsPaused(true), []);
-  const handlePlay = useCallback(() => setIsPaused(false), []);
-  const handleEnded = useCallback(() => {
-    setIsPaused(true);
-    onVideoEnded?.();
-  }, [onVideoEnded]);
+  const onScrub = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.currentTime = Number(e.target.value) / 1000;
+    report(true);
+  };
 
-  const handleScrub = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const target = Number(e.target.value);
-      const ms = (target / Math.max(1, totalFrames - 1)) * duration;
-      isUserSeek.current = true;
-      onSeekTime(ms);
-    },
-    [duration, totalFrames, onSeekTime]
-  );
+  /* Keyboard: space = play/pause, arrows = frame step */
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.target instanceof HTMLInputElement) return;
+    if (e.key === ' ') { e.preventDefault(); togglePlay(); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); stepFrame(1); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); stepFrame(-1); }
+  };
 
-  const handleStep = useCallback(
-    (deltaMs: number) => {
-      isUserSeek.current = true;
-      onSeekTime(Math.max(0, Math.min(totalFrames > 0 ? totalFrames * 100 : 0, currentTimeMs + deltaMs)));
-    },
-    [currentTimeMs, totalFrames, onSeekTime]
-  );
-
-  if (!src || videoError) {
-    return (
-      <div className={`flex items-center justify-center h-64 rounded-[16px] bg-[#242833] border border-[rgba(255,255,255,0.04)] ${className}`}>
-        <span className={`text-[12px] ${videoError ? 'text-[#F4533F]' : 'text-[#6E7486]'}`}>
-          {videoError || 'No video'}
-        </span>
-      </div>
-    );
-  }
+  const frameNo = Math.min(Math.max(totalFrames - 1, 0), Math.round((timeMs / 1000) * fps));
+  const fill = durationMs > 0 ? `${(timeMs / durationMs) * 100}%` : '0%';
 
   return (
-    <section className={`rounded-[16px] overflow-hidden border border-[rgba(255,255,255,0.04)] ${className}`}>
-      <div className="relative bg-[#161920] aspect-video">
-        <video
-          ref={videoRef}
-          src={src}
-          autoPlay
-          playsInline
-          muted
-          preload="metadata"
-          onLoadedMetadata={handleLoadedMetadata}
-          onTimeUpdate={handleTimeUpdate}
-          onPause={handlePause}
-          onPlay={handlePlay}
-          onEnded={handleEnded}
-          onError={() => setVideoError('Unsupported video format — use H.264 MP4')}
-          className="w-full h-full object-contain"
-          aria-label="Shot video"
+    <div className="flex flex-col" onKeyDown={onKey}>
+      <div className="bg-black rounded-t-[13px] overflow-hidden flex justify-center">
+        <div
+          className="relative w-full"
+          style={{ aspectRatio: String(aspect), maxWidth: `calc(min(68vh, 620px) * ${aspect})` }}
+        >
+          {error ? (
+            <div className="absolute inset-0 flex items-center justify-center p-6 text-center text-sm text-bad">
+              {error}
+            </div>
+          ) : (
+            <>
+              <video
+                ref={videoRef}
+                src={src}
+                playsInline
+                muted
+                preload="auto"
+                onLoadedMetadata={onLoaded}
+                onPlay={() => setPaused(false)}
+                onPause={() => setPaused(true)}
+                onEnded={() => setPaused(true)}
+                onSeeked={() => { drawOverlay(); report(true); }}
+                onError={() => setError('This video could not be played. Try an H.264 MP4.')}
+                onClick={togglePlay}
+                className="absolute inset-0 w-full h-full cursor-pointer"
+                aria-label="Shot video — click to play or pause"
+              />
+              <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" aria-hidden="true" />
+              {paused && (
+                <button
+                  onClick={togglePlay}
+                  className="absolute inset-0 m-auto w-16 h-16 rounded-full bg-black/55 backdrop-blur flex items-center justify-center text-white border border-white/20"
+                  aria-label="Play"
+                >
+                  <Play className="w-7 h-7 translate-x-0.5" fill="currentColor" />
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Controls */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 border-t border-line bg-raised rounded-b-[13px]">
+        <input
+          type="range"
+          min={0}
+          max={Math.max(1, Math.round(durationMs))}
+          step={1}
+          value={Math.round(timeMs)}
+          onChange={onScrub}
+          style={{ ['--fill' as string]: fill }}
+          className="order-first basis-full sm:order-none sm:basis-0 sm:flex-1 w-full"
+          aria-label="Scrub video"
         />
-        {showSkeleton && landmarks && landmarks.length > 0 ? (
-          <canvas
-            ref={canvasRef}
-            className="absolute inset-0 w-full h-full pointer-events-none"
-            aria-hidden="true"
-          />
-        ) : null}
-        <div className="absolute inset-0 flex items-center justify-center gap-2 bg-black/40 opacity-0 hover:opacity-100 transition-opacity p-3">
-          <button
-            onClick={onTogglePlay}
-            className="w-10 h-10 rounded-full bg-white/10 border border-white/20 flex items-center justify-center text-white hover:bg-white/20"
-            aria-label={playing ? 'Pause' : 'Play'}
-          >
-            {playing ? (
-              <span className="flex flex-col gap-1"><span className="w-1 h-3 bg-current" /><span className="w-1 h-3 bg-current" /></span>
-            ) : (
-              <span className="w-0 h-0 border-l-4 border-r-2 border-transparent border-t-current border-b-current" />
-            )}
+        <div className="flex items-center gap-1 sm:order-first">
+          <button className="btn btn-ghost btn-icon border-0" onClick={() => stepFrame(-1)} aria-label="Previous frame" title="Previous frame (←)">
+            <ChevronLeft className="w-5 h-5" />
           </button>
+          <button className="btn btn-primary btn-icon" onClick={togglePlay} aria-label={paused ? 'Play' : 'Pause'} title="Play / pause (space)">
+            {paused ? <Play className="w-4 h-4" fill="currentColor" /> : <Pause className="w-4 h-4" fill="currentColor" />}
+          </button>
+          <button className="btn btn-ghost btn-icon border-0" onClick={() => stepFrame(1)} aria-label="Next frame" title="Next frame (→)">
+            <ChevronRight className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="num text-[15px] text-body whitespace-nowrap">
+          <span className="text-ink">{fmt(timeMs)}</span> / {fmt(durationMs)} s
+          {totalFrames > 0 && <span className="text-mute ml-2">F{frameNo}</span>}
+        </div>
+        <div className="seg ml-auto" role="group" aria-label="Playback speed">
+          {SPEEDS.map((r) => (
+            <button key={r} aria-pressed={r === playbackRate} onClick={() => onRateChange(r)}>
+              {r}×
+            </button>
+          ))}
         </div>
       </div>
-
-      <div className="flex items-center justify-between gap-3 p-3 bg-[#242833] border-t border-[rgba(255,255,255,0.04)]">
-        <div className="flex items-center gap-3 text-[12px] text-[#6E7486]">
-          <span className="font-numeric text-[#AAB0BD]">{Math.floor(currentTimeMs / 1000).toFixed(0)}</span>
-          <span className="text-[#6E7486]">s</span>
-        </div>
-
-        <div className="flex-1 px-2">
-          <input
-            type="range"
-            min={0}
-            max={totalFrames > 0 ? totalFrames - 1 : 0}
-            value={timeToFrame(currentTimeMs, duration, totalFrames)}
-            onChange={handleScrub}
-            className="w-full h-2 bg-[#3A3F4E] rounded-full appearance-none cursor-pointer accent-[#1FB5D6]"
-            aria-label="Scrub video"
-          />
-        </div>
-
-        <div className="flex items-center gap-2 text-[12px]">
-          <button
-            onClick={() => handleStep(-1000)}
-            className="p-1.5 rounded-[8px] bg-[#242833] border border-[rgba(255,255,255,0.08)] text-[#AAB0BD] hover:bg-[#3A3F4E]"
-            title="Previous second"
-            aria-label="Previous second"
-          >
-            ‹
-          </button>
-          <span className="px-2 text-[#6E7486] font-numeric">{Math.round(playbackRate * 100)}%</span>
-          <div className="flex gap-1">
-            {SPEEDS.map((rate) => (
-              <button
-                key={rate}
-                onClick={() => onRateChange(rate)}
-                className={`px-2 py-1 rounded-[8px] text-[10px] font-bold border ${
-                  rate === playbackRate
-                    ? 'bg-[#1FB5D6] text-[#052E16] border-[#1FB5D6]'
-                    : 'border-[rgba(255,255,255,0.08)] text-[#6E7486] bg-[#242833] hover:bg-[#3A3F4E]'
-                }`}
-              >
-                {rate}x
-              </button>
-            ))}
-          </div>
-          <button
-            onClick={() => handleStep(1000)}
-            className="p-1.5 rounded-[8px] bg-[#242833] border border-[rgba(255,255,255,0.08)] text-[#AAB0BD] hover:bg-[#3A3F4E]"
-            title="Next second"
-            aria-label="Next second"
-          >
-            ›
-          </button>
-        </div>
-      </div>
-    </section>
+    </div>
   );
 };
+
+export default VideoPlayer;
