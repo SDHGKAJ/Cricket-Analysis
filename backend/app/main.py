@@ -10,7 +10,7 @@ import re
 import uuid
 import datetime
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,7 +27,8 @@ from .schemas.shot_schemas import (
     SessionCreate,
     SessionResponse,
     FlawItem,
-    TipItem
+    TipItem,
+    FrameLandmarks,
 )
 from .engine.shot_segmentation import ShotSegmentationEngine
 from .engine.metrics_calculator import MetricsCalculator
@@ -35,7 +36,7 @@ from .engine.flaw_detector import FlawDetector
 from .engine.shot_classifier import get_shot_classifier
 from .engine.yolo_tracker import CricketObjectTracker
 from .engine.slowmo_generator import SlowMoReplayGenerator
-from .engine.pose_overlay import analyze_video as analyze_pose_overlay
+from .engine.pose_overlay import analyze_video as analyze_pose_overlay, create_pose_detector
 from .engine.cricket_analyzer import analyze_cricket_shot
 from .engine.video_normalizer import probe_video, normalize_video, is_compatible
 from .engine.yolo_tracker import CricketBallTracker
@@ -47,6 +48,10 @@ Base.metadata.create_all(bind=engine)
 # otherwise fall back to the rule-based classifier.
 SHOT_CLASSIFIER_ONNX = BASE_DIR / "cricket_shot_classifier.onnx"
 SHOT_CLASSIFIER_MODE = "ml" if SHOT_CLASSIFIER_ONNX.exists() else "rule_based"
+
+# Video analysis limits
+MAX_ANALYSIS_SECONDS = 6.0  # analyse at most the first 6 s of a clip
+MIN_POSE_FRAMES = 10        # fewer frames with a visible batter -> shot is not scored
 
 app = FastAPI(
     title="Cricket Batting Biomechanics & Shot Analysis API",
@@ -235,6 +240,7 @@ def analyze_shot_sequence(data: AnalyzeShotSequenceRequest, db: Session = Depend
         impact_frame=impact_frame,
         total_frames=len(data.frames),
         shot_id=shot_id,
+        confidence=round(float(conf) * 100, 1) if conf is not None else None,
         frames=data.frames
     )
 
@@ -294,84 +300,60 @@ async def analyze_video_upload(
     # Use the normalized (or original compatible) file for all downstream processing.
     processing_path = normalized_path if normalized_path else saved_path
 
-    # Run OpenCV video landmark & kinematic processing
+    # ── Pose extraction (MediaPipe Tasks API) ─────────────────────────────
+    # Every frame keeps its index/timestamp so ball positions and the video
+    # stay aligned. Frames where no person is found get an empty landmark
+    # list. No synthetic landmarks are ever generated: if pose can't be
+    # measured, the shot is returned unrated instead of with a made-up score.
+    import cv2
+
+    cap = cv2.VideoCapture(str(processing_path))
+    if not cap.isOpened():
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "video_unreadable", "reason": "OpenCV could not open the uploaded video."},
+        )
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
+    max_frames = int(round(fps * MAX_ANALYSIS_SECONDS))
+
+    detector = create_pose_detector()
+    if detector is None:
+        cap.release()
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "pose_unavailable", "reason": "MediaPipe pose detector could not be loaded on the server."},
+        )
+
     frames_data: List[Dict[str, Any]] = []
     try:
-        import cv2
-        cap = cv2.VideoCapture(str(processing_path))
+        frame_idx = 0
+        while frame_idx < max_frames:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            ts = (frame_idx / fps) * 1000.0
+            lms = detector.detect(frame, ts)
+            landmarks = (
+                [{"x": float(l.x), "y": float(l.y), "z": float(l.z),
+                  "visibility": float(getattr(l, "visibility", 1.0) or 0.0)} for l in lms]
+                if lms else []
+            )
+            frames_data.append({"frame_index": frame_idx, "timestamp_ms": ts, "landmarks": landmarks})
+            frame_idx += 1
+    finally:
+        cap.release()
+        detector.close()
 
-        if not cap.isOpened():
-            # Video file cannot be opened (e.g., missing moov atom in MP4).
-            # Use fallback frames so downstream analysis still works.
-            frames_data = [
-                {
-                    "frame_index": i,
-                    "timestamp_ms": i * 33.3,
-                    "landmarks": [{"x": 0.5, "y": 0.3, "z": 0.0, "visibility": 0.99}] * 33,
-                }
-                for i in range(45)
-            ]
-        else:
-            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
-            frame_idx = 0
+    if not frames_data:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "no_frames", "reason": "No frames could be read from the video."},
+        )
 
-            # Try mediapipe pose if installed in python, otherwise simulate trajectory proxy
-            mp_pose = None
-            pose_estimator = None
-            try:
-                import mediapipe as mp
-                mp_pose = mp.solutions.pose
-                pose_estimator = mp_pose.Pose(static_image_mode=False, min_detection_confidence=0.5)
-            except Exception:
-                pass
-
-            while cap.isOpened() and frame_idx < 180:  # limit to 6s
-                ret, frame = cap.read()
-                if not ret:
-                    break
-
-                landmarks = []
-                if pose_estimator:
-                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    res = pose_estimator.process(rgb)
-                    if res.pose_landmarks:
-                        for lm in res.pose_landmarks.landmark:
-                            landmarks.append({"x": lm.x, "y": lm.y, "z": lm.z, "visibility": lm.visibility})
-
-                if not landmarks:
-                    # Generate realistic front-on cover drive kinematic anchor frames
-                    progress = frame_idx / 60.0
-                    swing_arc = math.sin(progress * math.pi)
-                    landmarks = [{"x": 0.5 + 0.05 * math.sin(progress), "y": 0.2, "z": 0.0}] * 33
-                    # Left wrist
-                    landmarks[15] = {"x": 0.45 + swing_arc * 0.15, "y": 0.35 + swing_arc * 0.3, "z": 0.0}
-                    # Right wrist
-                    landmarks[16] = {"x": 0.48 + swing_arc * 0.14, "y": 0.38 + swing_arc * 0.28, "z": 0.0}
-
-                frames_data.append({
-                    "frame_index": frame_idx,
-                    "timestamp_ms": (frame_idx / fps) * 1000.0,
-                    "landmarks": landmarks
-                })
-                frame_idx += 1
-
-            cap.release()
-    except Exception as e:
-        # Fallback frames if OpenCV fails during processing
-        frames_data = [
-            {
-                "frame_index": i,
-                "timestamp_ms": i * 33.3,
-                "landmarks": [{"x": 0.5, "y": 0.3, "z": 0.0, "visibility": 0.99}] * 33,
-            }
-            for i in range(45)
-        ]
-
-    # Merge YOLOv8n ball detections into frames so downstream analysis can use ball position
-    # ball_pos comes back as [x, y] (normalized 0..1); schema expects Dict[str, float] {"x": ..., "y": ...}
-    # Also build pixel-space ball positions for the pose-overlay video drawing.
+    # Merge ball detections into frames (normalised x/y for the UI and
+    # downstream metrics; pixel positions for the pose-overlay drawing).
     ball_positions: List[Optional[Tuple[float, float, float]]] = [None] * len(frames_data)
     try:
         tracking = object_tracker.track_objects_in_sequence(frames_data, video_path=str(processing_path))
@@ -381,28 +363,47 @@ async def analyze_video_upload(
                 conf = float(track.get("conf") or 0.0)
                 frames_data[i]["ball_position"] = {"x": float(bx), "y": float(by)}
                 ball_positions[i] = (bx * width, by * height, conf)
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[analyze-video] ball tracking failed: {exc}")
 
-    # Run analysis
-    req = AnalyzeShotSequenceRequest(
-        session_id=session_id,
-        camera_angle=camera_angle,
-        batter_hand=batter_hand,
-        shot_type_hint="cover_drive",
-        frames=frames_data
-    )
-    result = analyze_shot_sequence(req, db)
+    pose_frames = [f for f in frames_data if f["landmarks"]]
+    if len(pose_frames) >= MIN_POSE_FRAMES:
+        req = AnalyzeShotSequenceRequest(
+            session_id=session_id,
+            camera_angle=camera_angle,
+            batter_hand=batter_hand,
+            shot_type_hint=None,  # let the classifier decide
+            frames=pose_frames,
+        )
+        result = analyze_shot_sequence(req, db)
+    else:
+        # Not enough of the batter was visible to score the shot honestly.
+        result = ShotAnalysisResponse(
+            shot_type="",
+            overall_score=None,
+            timing_score=None,
+            metrics={},
+            flaws=[],
+            tips=[],
+            feedback=[f"Batter's pose found in only {len(pose_frames)} of {len(frames_data)} frames "
+                      f"- not enough to score the shot. Keep the whole body in frame."],
+        )
+    # The UI needs every frame (ball positions, timeline), not just pose frames.
+    result.frames = [FrameLandmarks(**f) for f in frames_data]
+    result.total_frames = len(frames_data)
 
     # Generate slow-mo video replay
-    replay_path = replay_generator.annotate_video_clip(
-        video_path=str(processing_path),
-        frames_analysis=frames_data,
-        flaws=[f.model_dump() for f in result.flaws],
-        impact_frame=result.impact_frame or 20
-    )
-    if replay_path:
-        result.replay_url = f"/replays/{Path(replay_path).name}"
+    try:
+        replay_path = replay_generator.annotate_video_clip(
+            video_path=str(processing_path),
+            frames_analysis=frames_data,
+            flaws=[f.model_dump() for f in result.flaws],
+            impact_frame=result.impact_frame or 20
+        )
+        if replay_path:
+            result.replay_url = f"/replays/{Path(replay_path).name}"
+    except Exception as exc:
+        print(f"[analyze-video] slow-mo replay failed: {exc}")
 
     # OpenPose-style skeleton overlay video (original resolution/FPS, H.264)
     try:
@@ -421,7 +422,7 @@ async def analyze_video_upload(
         )
         result.cricket_video_url = f"/outputs/{cricket_out.name}"
         result.cricket_report_url = f"/outputs/{cricket_out.stem}.json"
-        result.feedback = report.get("feedback", [])
+        result.feedback = (result.feedback or []) + report.get("feedback", [])
         result.ball_tracking = report.get("ball_tracking")
     except Exception:
         pass  # cricket analysis is best-effort; rest of the result is still returned

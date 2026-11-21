@@ -38,8 +38,9 @@ export interface TipItem {
 
 export interface ShotAnalysis {
   shot_type: string;
-  overall_score: number;
-  timing_score: number;
+  /** null when the shot could not be scored (batter not visible enough) */
+  overall_score: number | null;
+  timing_score: number | null;
   metrics: {
     timing?: number;
     head_position?: number;

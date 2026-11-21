@@ -17,8 +17,10 @@ class TipItem(BaseModel):
 
 class ShotAnalysisResponse(BaseModel):
     shot_type: str = "cover_drive"
-    overall_score: float = Field(..., ge=0.0, le=10.0)
-    timing_score: float = Field(..., ge=0.0, le=10.0)
+    # None when the shot could not be scored (e.g. batter not visible)
+    overall_score: Optional[float] = Field(None, ge=0.0, le=10.0)
+    timing_score: Optional[float] = Field(None, ge=0.0, le=10.0)
+    confidence: Optional[float] = None  # shot-type classifier confidence, %
     metrics: Dict[str, float]
     flaws: List[FlawItem]
     tips: List[TipItem]
